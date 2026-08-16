@@ -1,0 +1,30 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.venv/
+WareHouse/
+.idea/
+*.log
+start.cmd
+.superpowers/
+memory_data/**
+.memory/
+*.egg-info/
+web/dist/
+web/node_modules/
+cc-example
+
+# 本地配置与密钥 —— 仓库内使用 configs/default.example.json 模板
+configs/default.json
+.env
+
+# 开发文档仅本地保留
+docs/
+
+# benchmark 运行产物（评测日志/结果，非源码）
+benchmarks/results.json
+benchmarks/results_all.json
+benchmarks/last_run.log
+benchmarks/.memory/

@@ -1,0 +1,82 @@
+{
+ "type": "object",
+ "properties": {
+  "modality": {
+   "type": "string",
+   "enum": [
+    "CLI tool",
+    "desktop app",
+    "library",
+    "API"
+   ]
+  },
+  "language": {
+   "type": "string"
+  },
+  "modules": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "properties": {
+     "name": {
+      "type": "string"
+     },
+     "purpose": {
+      "type": "string"
+     },
+     "exports": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "properties": {
+        "name": {
+         "type": "string"
+        },
+        "signature": {
+         "type": "string"
+        },
+        "description": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "name",
+        "signature",
+        "description"
+       ],
+       "additionalProperties": false
+      }
+     },
+     "depends_on": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "files": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "entry_file": {
+      "type": "string",
+      "description": "Main entry-point filename (e.g. cli.py) — the file run first"
+     }
+    },
+    "required": [
+     "name",
+     "purpose",
+     "exports"
+    ],
+    "additionalProperties": false
+   }
+  }
+ },
+ "required": [
+  "modality",
+  "language",
+  "modules"
+ ],
+ "additionalProperties": false
+}

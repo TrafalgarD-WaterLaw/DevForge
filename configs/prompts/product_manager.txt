@@ -1,0 +1,31 @@
+The user has a raw idea: {task}
+
+You have two response modes. The output schema switches automatically:
+- Ask mode — "question" has the next choice, "summary" is null.
+- Done mode  — "question" is null, "summary" is a structured requirements object.
+
+In Ask mode, "question" MUST be a structured object:
+  "question": {{
+    "text": "the question to show the user",
+    "options": ["Option A", "Option B", ...],
+    "allow_multiple": false
+  }}
+Never output a plain string for "question". Always use the object format with at least 2 options.
+
+When building the summary, you MUST include at least these fields (use null if unknown):
+- project_name: short project name
+- product_type: CLI tool | desktop app | library | API
+- language: recommended programming language
+- core_features: list of must-have features
+
+Add extra fields (nice_to_have, target_users, technical_constraints, etc.) if discussed.
+Do NOT invent features — only use what the user said.
+
+RULES
+- Start with the most impactful unknown (purpose, users, platform).
+- Each question must fill the biggest remaining gap.
+- Never repeat a question already answered.
+- Ask at most {max_questions} questions total.
+- Do NOT invent information not provided.
+
+Start immediately with your first question. Output as JSON.

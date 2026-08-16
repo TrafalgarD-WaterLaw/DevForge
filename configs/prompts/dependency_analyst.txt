@@ -1,0 +1,9 @@
+Task: {task}
+
+Code:
+{codes}
+
+Output the exact requirements.txt content as plain text (no JSON wrapper, no extra commentary, no code fence):
+- List each third-party dependency on its own line.
+- If the project uses only the standard library, the first line should be: # No external dependencies.
+- Version pins (==x.y.z) are allowed but not required.

@@ -1,0 +1,16 @@
+DevForge
+Copyright 2026
+
+This product includes software developed by the ChatDev project
+(https://github.com/OpenBMB/ChatDev), licensed under the Apache
+License, Version 2.0.
+
+Significant modifications include but are not limited to:
+- Architectural restructure (new module layout)
+- Multi-provider LLM abstraction layer (strategy pattern)
+- DAG pipeline engine with Serial/Parallel/Condition/Loop executors
+- Tool calling / ReAct loop for LLM agents
+- Code quality evaluation system (six-dimension analysis)
+- ChromaDB-based experience memory
+- Web visualization dashboard with WebSocket real-time updates
+- YAML-based declarative configuration system

@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DevForge — Agent Pipeline Animation</title>
+  <style>
+    /* ── Reset & Theme ── */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: #0d1117;
+      color: #c9d1d9;
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* ── Floating Particle Background ── */
+    .particles {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 0;
+      overflow: hidden;
+    }
+    .particle {
+      position: absolute;
+      width: 6px;
+      height: 6px;
+      background: rgba(88, 166, 255, 0.25);
+      border-radius: 50%;
+      animation: float linear infinite;
+    }
+    @keyframes float {
+      0%   { transform: translateY(100vh) scale(0); opacity: 0; }
+      10%  { opacity: 1; }
+      90%  { opacity: 1; }
+      100% { transform: translateY(-10vh) scale(1); opacity: 0; }
+    }
+
+    /* ── Main Container ── */
+    .container {
+      position: relative;
+      z-index: 1;
+      max-width: 800px;
+      width: 90%;
+      padding: 2rem 1.5rem;
+      text-align: center;
+    }
+
+    /* ── Title ── */
+    .title {
+      font-size: 2.6rem;
+      font-weight: 800;
+      margin-bottom: 0.4rem;
+      background: linear-gradient(135deg, #58a6ff, #3fb950, #f0883e);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .subtitle {
+      font-size: 0.95rem;
+      color: #8b949e;
+      margin-bottom: 2.5rem;
+    }
+
+    /* ── Pipeline ── */
+    .pipeline {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-bottom: 2.5rem;
+    }
+
+    /* ── Agent Card ── */
+    .agent-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.4rem;
+      transition: all 0.4s ease;
+      min-width: 100px;
+    }
+    .agent-card.waiting { opacity: 0.35; }
+    .agent-card.working { opacity: 1; }
+    .agent-card.done    { opacity: 1; }
+
+    .agent-avatar {
+      width: 72px;
+      height: 72px;
+      border-radius: 50%;
+      background: #21262d;
+      border: 2px solid #30363d;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 2rem;
+      transition: border-color 0.4s, box-shadow 0.4s, transform 0.4s;
+    }
+    .agent-card.working .agent-avatar {
+      border-color: #58a6ff;
+      box-shadow: 0 0 14px rgba(88, 166, 255, 0.45);
+      animation: bounce 0.6s ease-in-out infinite alternate;
+    }
+    .agent-card.done .agent-avatar {
+      border-color: #3fb950;
+      box-shadow: 0 0 14px rgba(63, 185, 80, 0.4);
+    }
+
+    @keyframes bounce {
+      0%   { transform: translateY(0); }
+      100% { transform: translateY(-8px); }
+    }
+
+    .agent-label {
+      font-weight: 600;
+      font-size: 0.9rem;
+      color: #c9d1d9;
+    }
+    .agent-role {
+      font-size: 0.75rem;
+      color: #8b949e;
+    }
+
+    /* Done checkmark badge */
+    .badge {
+      display: none;
+      font-size: 0.85rem;
+      color: #3fb950;
+    }
+    .agent-card.done .badge { display: inline-block; }
+
+    /* ── Arrow ── */
+    .arrow {
+      font-size: 1.4rem;
+      color: #30363d;
+      transition: color 0.3s;
+      user-select: none;
+    }
+    .arrow.active { color: #58a6ff; }
+
+    /* ── Status ── */
+    .status {
+      min-height: 2rem;
+      font-size: 0.95rem;
+      color: #8b949e;
+      margin-bottom: 1.5rem;
+    }
+    .status strong { color: #58a6ff; font-weight: 600; }
+
+    /* ── Input Area ── */
+    .input-area {
+      display: flex;
+      gap: 0.6rem;
+      max-width: 480px;
+      margin: 0 auto;
+    }
+    .input-area input {
+      flex: 1;
+      padding: 0.65rem 1rem;
+      border-radius: 6px;
+      border: 1px solid #30363d;
+      background: #161b22;
+      color: #c9d1d9;
+      font-size: 0.9rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .input-area input:focus { border-color: #58a6ff; }
+    .input-area input::placeholder { color: #484f58; }
+
+    .btn {
+      padding: 0.65rem 1.4rem;
+      border-radius: 6px;
+      border: none;
+      background: #238636;
+      color: #fff;
+      font-weight: 600;
+      font-size: 0.9rem;
+      cursor: pointer;
+      transition: background 0.2s;
+      white-space: nowrap;
+    }
+    .btn:hover { background: #2ea043; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* ── Responsive ── */
+    @media (max-width: 600px) {
+      .title { font-size: 1.8rem; }
+      .pipeline { gap: 0.3rem; }
+      .agent-card { min-width: 70px; }
+      .agent-avatar { width: 56px; height: 56px; font-size: 1.5rem; }
+      .arrow { font-size: 1rem; }
+      .input-area { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <!-- Particles -->
+  <div class="particles" id="particles"></div>
+
+  <!-- Main -->
+  <div class="container">
+    <h1 class="title">🏭 DevForge</h1>
+    <p class="subtitle">AI Multi-Agent Collaborative Software Forge</p>
+
+    <div class="pipeline" id="pipeline">
+      <!-- injected by JS -->
+    </div>
+
+    <p class="status" id="status">Press <strong>Start Forging</strong> to begin the pipeline demo</p>
+
+    <div class="input-area">
+      <input id="taskInput" type="text" placeholder="Describe the software you want to build..." value="Design a calculator app" />
+      <button class="btn" id="startBtn">Start Forging</button>
+    </div>
+  </div>
+
+  <script>
+    /* ── Config ── */
+    const AGENTS = [
+      { id: 'ceo',       emoji: '\u{1F9D1}‍\u{1F4BB}', label: 'CEO',        role: 'Demand Analysis' },
+      { id: 'dev',       emoji: '\u{1F9D1}‍\u{1F4BB}', label: 'Developer',  role: 'Coding' },
+      { id: 'review',    emoji: '\u{1F50D}',                label: 'Reviewer',   role: 'Code Review' },
+      { id: 'qa',        emoji: '\u{1F9EA}',                label: 'QA',         role: 'Testing' },
+    ];
+
+    const CYCLE = ['ceo', 'dev', 'review', 'qa'];
+    const STATUS_TEXT = {
+      idle:   'Press <strong>Start Forging</strong> to begin the pipeline demo',
+      ceo:    'CEO is analyzing requirements...',
+      dev:    'Developer is writing code...',
+      review: 'Reviewer is checking the code...',
+      qa:     'QA engineer is running tests...',
+      done:   'All agents completed! <span style="color:#3fb950;">✓</span>',
+    };
+
+    /* ── DOM Refs ── */
+    const pipelineEl = document.getElementById('pipeline');
+    const statusEl   = document.getElementById('status');
+    const startBtn   = document.getElementById('startBtn');
+    const taskInput  = document.getElementById('taskInput');
+
+    let currentIndex = -1;
+    let timer = null;
+    let running = false;
+
+    /* ── Render Cards ── */
+    function renderPipeline() {
+      pipelineEl.innerHTML = '';
+      AGENTS.forEach((agent, i) => {
+        const card = document.createElement('div');
+        card.className = 'agent-card waiting';
+        card.dataset.agentId = agent.id;
+        card.innerHTML = `
+          <div class="agent-avatar">${agent.emoji}</div>
+          <div class="agent-label">${agent.label}</div>
+          <div class="agent-role">${agent.role}</div>
+          <div class="badge">✓ Done</div>
+        `;
+        pipelineEl.appendChild(card);
+
+        if (i < AGENTS.length - 1) {
+          const arrow = document.createElement('span');
+          arrow.className = 'arrow';
+          arrow.dataset.arrowIdx = i;
+          arrow.textContent = '▶';
+          pipelineEl.appendChild(arrow);
+        }
+      });
+    }
+    renderPipeline();
+
+    /* ── Particles ── */
+    function createParticles() {
+      const container = document.getElementById('particles');
+      for (let i = 0; i < 30; i++) {
+        const p = document.createElement('div');
+        p.className = 'particle';
+        const size = 3 + Math.random() * 5;
+        p.style.width  = size + 'px';
+        p.style.height = size + 'px';
+        p.style.left   = Math.random() * 100 + '%';
+        p.style.animationDuration = (6 + Math.random() * 10) + 's';
+        p.style.animationDelay    = (Math.random() * 10) + 's';
+        container.appendChild(p);
+      }
+    }
+    createParticles();
+
+    /* ── Phase Mapping ── */
+    function phaseToAgent(phaseName) {
+      const map = {
+        DemandAnalysis: 'ceo',
+        Coding: 'dev',
+        CodeComplete: 'dev',
+        CodeReview: 'review',
+        Test: 'qa',
+      };
+      return map[phaseName] || null;
+    }
+
+    /* ── Card Ref Helpers ── */
+    function getCard(id) {
+      return pipelineEl.querySelector(`.agent-card[data-agent-id="${id}"]`);
+    }
+    function getArrow(idx) {
+      return pipelineEl.querySelector(`.arrow[data-arrow-idx="${idx}"]`);
+    }
+
+    function setAgentState(id, state) {
+      const card = getCard(id);
+      if (!card) return;
+      card.classList.remove('waiting', 'working', 'done');
+      if (state) card.classList.add(state);
+    }
+
+    function resetAll() {
+      AGENTS.forEach(a => setAgentState(a.id, 'waiting'));
+      document.querySelectorAll('.arrow').forEach(a => a.classList.remove('active'));
+    }
+
+    /* ── Public API (for Vue integration) ── */
+    function onPhaseStart(phaseName) {
+      const agentId = phaseToAgent(phaseName);
+      if (!agentId) return;
+      setAgentState(agentId, 'working');
+      statusEl.innerHTML = STATUS_TEXT[agentId] || `${agentId} is working...`;
+    }
+
+    function onPhaseEnd(phaseName) {
+      const agentId = phaseToAgent(phaseName);
+      if (!agentId) return;
+      setAgentState(agentId, 'done');
+      const idx = CYCLE.indexOf(agentId);
+      if (idx >= 0 && idx < AGENTS.length - 1) {
+        const arrow = getArrow(idx);
+        if (arrow) arrow.classList.add('active');
+      }
+      if (agentId === 'qa') {
+        statusEl.innerHTML = STATUS_TEXT.done;
+      }
+    }
+
+    /* ── Demo Cycle ── */
+    function nextStep() {
+      if (currentIndex >= 0 && currentIndex < CYCLE.length) {
+        const prevId = CYCLE[currentIndex];
+        onPhaseEnd(prevId);
+      }
+
+      currentIndex++;
+      if (currentIndex >= CYCLE.length) {
+        // reset
+        running = false;
+        startBtn.disabled = false;
+        startBtn.textContent = 'Start Forging';
+        statusEl.innerHTML = 'Pipeline complete! <span style="color:#3fb950;">✓</span>';
+        return;
+      }
+
+      const agentId = CYCLE[currentIndex];
+      onPhaseStart(agentId);
+    }
+
+    function startDemo() {
+      if (running) return;
+      running = true;
+      startBtn.disabled = true;
+      startBtn.textContent = 'Forging...';
+      currentIndex = -1;
+      resetAll();
+      nextStep();
+      timer = setInterval(nextStep, 2000);
+    }
+
+    function stopDemo() {
+      if (timer) { clearInterval(timer); timer = null; }
+      running = false;
+      startBtn.disabled = false;
+      startBtn.textContent = 'Start Forging';
+    }
+
+    startBtn.addEventListener('click', () => {
+      stopDemo();
+      if (taskInput.value.trim()) {
+        statusEl.innerHTML = `Task: <strong>${taskInput.value.trim()}</strong>`;
+      }
+      startDemo();
+    });
+
+    /* Expose for external use */
+    window.ForgeAnimation = { onPhaseStart, onPhaseEnd, startDemo, stopDemo, resetAll };
+  </script>
+</body>
+</html>

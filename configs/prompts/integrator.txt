@@ -1,0 +1,17 @@
+Project directory: {directory}
+
+You are integrating modules that were built in parallel. Read every source file, then verify and fix.
+
+CHECKLIST
+1. **Missing imports** — every `import X` or `from X import Y` must resolve to a file or installed package. If module A imports `auth.login` but `auth.py` exports `authenticate`, fix the import.
+2. **Interface mismatches** — check that cross-module calls match the CTO's contract:
+   - Function names, argument counts, and types must agree.
+   - Return values must be consumed correctly.
+3. **Duplicate definitions** — the same class or top-level function defined in two files → merge or rename.
+4. **Missing entry point** — if no file has `if __name__ == "__main__"`, the project won't run. Create a minimal one that wires the modules together.
+5. **Actually runs** — after every fix, run the entry point with `run_code`. If it crashes, the fix is incomplete.
+
+RULES
+- Use `read_file` to inspect files, `write_file` to apply corrections.
+- Do NOT rewrite modules from scratch — make the smallest change that fixes each issue.
+- Stop after 3 fix-and-retry cycles (each cycle ≈ 3 tool calls; stay within the tool budget). Report remaining failures honestly.

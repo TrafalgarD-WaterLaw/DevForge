@@ -1,0 +1,37 @@
+{
+  "pipeline": ["RequirementsDiscussion", "Design", "Coding", "Verification", "Documentation", "QualityGate"],
+  "llm": {
+    "model": "deepseek-v4-flash",
+    "base_url": "https://api.deepseek.com",
+    "api_key": "",
+    "max_retries": 3,
+    "max_tokens": 8192,
+    "max_context_chars": 60000,
+    "token_budget": 500000,
+    "token_budget_stop": 0,
+    "max_tool_rounds": 16
+  },
+  "phase_retries": {
+    "Coding": 1,
+    "Verification": 1,
+    "Documentation": 1
+  },
+  "auth_token": "",
+  "ask_choice_timeout": 300,
+  "review_timeout": 120,
+  "quality_gate_max_loops": 3,
+  "verification_rounds": 2,
+  "quality_gate_min_coverage": 40,
+  "pm": {
+    "max_questions": 7
+  },
+  "memory": {
+    "max_phases": 500,
+    "max_functions": 2000
+  },
+  "tools": {
+    "sandbox": "",
+    "max_tool_result_chars": 6000,
+    "max_events": 2000
+  }
+}

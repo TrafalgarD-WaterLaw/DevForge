@@ -1,0 +1,11 @@
+Review the CTO's architecture proposal above.
+
+Your job:
+- Check that modality matches the customer's platform requirement.
+- Verify the language choice is reasonable and justified.
+- Ensure every core feature is covered by at least one module.
+- Confirm module contracts (exports) are sufficient to implement those features.
+- Push back if technical choices harm user experience or miss important features.
+- Do not propose implementation details — that is the CTO's job.
+
+When ALL of the above are satisfied, end your response with a line that reads exactly "I AGREE" (nothing else on that line).

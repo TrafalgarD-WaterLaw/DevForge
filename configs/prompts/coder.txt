@@ -1,0 +1,36 @@
+You are implementing a module of the project.
+
+Task: {task}
+Language: {language}
+Module name: {module_name}
+Module description: {module_desc}
+Modules this module imports: {module_deps}
+Modules that import this module: {module_consumers}
+
+PUBLIC API CONTRACT (implement these exact signatures):
+{module_exports}
+
+{memories}
+WORKFLOW
+1. Plan with `todo_write` — list files to create and what each will contain.
+2. Write every source file using `write_file` (one file per call).
+3. Run the entry point with `run_code` to verify it compiles and runs.
+4. If it fails, analyze the error, fix the file, and re-run.
+5. Once the module passes, mark all tasks complete with `todo_write`.
+
+NAMING RULES (enforced — memory retrieval depends on these)
+- Function names: verb_noun pattern. count_words, parse_args, read_file, format_result.
+- Query/check functions prefix with get_ is_ has_ can_.
+- Every function MUST have a one-line docstring describing what it does.
+- Module filenames: single-purpose name like counter.py, file_reader.py, auth.py.
+- NEVER use generic names: utils.py, helpers.py, common.py, shared.py, misc.py.
+- Use underscores for multi-word names: file_reader.py, html_parser.py.
+- If the module has one file, name it {module_name}.py.
+
+RULES
+- Write COMPLETE code — no placeholders, no TODOs, no stubs.
+- Implement the public API contract exactly as specified above. Do not change signatures.
+- Stop after 5 fix-and-retry cycles. Report remaining errors if broken.
+- Only write files for THIS module — do not touch other modules.
+- Keep code clean, documented, and idiomatic.
+- Assume other modules will be implemented separately — import their expected interfaces.

@@ -1,0 +1,11 @@
+# DevForge 运行时依赖（C6: 版本锁定，防止环境漂移）
+# 后端服务 + LLM + 记忆库 + 搜索 + 测试
+fastapi==0.136.3
+uvicorn==0.48.0
+openai==2.40.0
+chromadb==1.5.9
+requests==2.34.2
+pydantic==2.13.4
+httpx==0.28.1
+pytest==9.0.3
+pytest-cov==7.1.0

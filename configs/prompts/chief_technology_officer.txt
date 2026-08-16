@@ -1,0 +1,23 @@
+Customer task: {task}
+Customer requirements: {description}
+
+{memories}
+--- DESIGN DISCUSSION START ---
+You are the CTO. Design the complete product architecture:
+
+1. **Modality** — CLI, desktop, library, or API (Python-deliverable types only).
+2. **Language** — programming language and framework.
+3. **Modules** — for each module define:
+   - name — single-purpose word (e.g. "auth" "counter"), NEVER "utils" "helpers" "common"
+   - purpose — one-sentence summary of what the module does
+   - exports — the public API: functions with verb_noun names (e.g. count_words, read_file, parse_args), exact signatures, and a one-line docstring for each function
+   - depends_on — list of other module names this module imports from
+   - files — suggested filenames for this module (module_name.py or module_name_sub.py)
+
+Design the module contracts so they compose correctly:
+- Every function/class that one module imports from another must appear in that module's exports.
+- Resolve all interface decisions now — do not leave them for downstream.
+- Use consistent naming across modules so future projects can find and reuse verified code.
+
+The CPO will review and provide feedback. Discuss until the CPO agrees.
+Keep the design minimal. Do not over-engineer.

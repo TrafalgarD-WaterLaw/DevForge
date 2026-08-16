@@ -1,0 +1,36 @@
+{
+  "tasks": [
+    {
+      "name": "wordcount",
+      "prompt": "设计一个命令行字数统计工具：输入一个或多个文本文件，统计每个文件的行数、单词数、字符数（忽略空白字符），支持 -l/-w/-c 选项与帮助信息。"
+    },
+    {
+      "name": "ledger",
+      "prompt": "设计一个记账命令行工具记账本：支持添加收入/支出记录（日期、类别、金额、备注）、查看记录列表、按类别统计汇总。"
+    },
+    {
+      "name": "calculator",
+      "prompt": "Design a simple calculator CLI in Python that supports add, subtract, multiply, and divide. It accepts two numbers and an operator and prints the result."
+    },
+    {
+      "name": "todo",
+      "prompt": "Build a command-line todo list application in Python. It should support adding tasks, listing all tasks, marking tasks as complete, and deleting tasks. Tasks should be persisted to a JSON file so they survive restarts."
+    },
+    {
+      "name": "password_gen",
+      "prompt": "Create a command-line password generator in Python. It should let the user specify length (default 16), whether to include uppercase, digits, and symbols. Generate a random password matching the criteria and print it."
+    },
+    {
+      "name": "unit_converter",
+      "prompt": "设计一个命令行单位换算工具：支持长度（米/千米/英里）、重量（克/千克/磅）、温度（摄氏/华氏）之间的换算，输入数值与单位对，输出换算结果。"
+    },
+    {
+      "name": "expense_stats",
+      "prompt": "开发一个 CSV 数据分析脚本：读取学生成绩 CSV 文件（学号、姓名、语文、数学、英语），计算每科平均分、最高分、最低分、不及格人数，并生成汇总报告。"
+    },
+    {
+      "name": "file_organizer",
+      "prompt": "设计一个命令行文件整理工具：扫描指定目录，按扩展名把文件移动到对应子目录（如 images/ documents/），支持 --dry-run 预览模式，支持排除指定扩展名。"
+    }
+  ]
+}

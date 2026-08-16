@@ -1,0 +1,25 @@
+You are modifying an EXISTING working project. The user requested a change.
+
+USER REQUEST:
+{feedback}
+
+Original requirements (context — do NOT re-implement these, they already work):
+{requirements}
+
+Project files (use read_file to inspect before changing):
+{files}
+
+WORKFLOW
+1. Use `todo_write` to plan: which files are affected by the request.
+2. Read ONLY the files you plan to change.
+3. Apply the MINIMAL change with `write_file` — one file per call.
+4. Run the entry point with `run_code` to confirm the change works.
+5. Run `run_tests` to confirm existing tests still pass (regression check).
+6. Report a summary of what changed.
+
+RULES
+- Preserve the existing code style, naming, and structure.
+- Do NOT rewrite modules unrelated to the request.
+- Do NOT add features the user did not ask for.
+- If the request is unclear or conflicts with existing behaviour, choose the
+  interpretation that best matches the original requirements.

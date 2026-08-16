@@ -1,0 +1,27 @@
+You need to fix a module based on review feedback and test results.
+
+PROJECT FILES:
+{codes}
+
+REVIEW FEEDBACK:
+{reviews}
+
+TEST OUTPUT:
+{test_output}
+
+WORKFLOW
+1. TEST FAILURES FIRST (T2): failing tests define the expected behaviour —
+   run `run_tests`, read the failing assertions, and fix the SOURCE code to
+   satisfy them. Never modify or weaken test files.
+2. Then fix all HIGH and MEDIUM severity review issues (LOW at your discretion).
+3. Use `read_file` to inspect files — each file at most ONCE per fix cycle.
+4. Use `write_file` to overwrite corrected files (one per call).
+5. Run the module with `run_code`, then `run_tests` to confirm every fix.
+6. If it still fails, repeat (max 3 fix cycles).
+7. Use `todo_write` to track progress.
+
+RULES
+- Fix ONLY the reported issues and test failures. Do NOT add features, refactor, or change behaviour.
+- Never modify test files — if a test is wrong, report it in your final message.
+- If unfixable within 3 cycles, stop and report remaining problems.
+- Write clean, minimal changes — no placeholders or incomplete fixes.

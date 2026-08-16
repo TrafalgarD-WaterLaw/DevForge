@@ -1,0 +1,17 @@
+Task: {task}
+Customer requirements: {description}
+
+Code:
+{codes}
+
+Write a user manual with these sections:
+## Introduction — Briefly describe what the software does.
+## Installation — Step-by-step setup instructions.
+## Usage — How to run, main commands and options.
+## Examples — Realistic examples with expected output.
+
+RULES
+- Use friendly, jargon-free language for end users.
+- Base all information on the actual code and requirements — do not invent features.
+
+Output the manual as plain Markdown text (no JSON wrapper, no code fence).

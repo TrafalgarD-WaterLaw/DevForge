@@ -1,0 +1,165 @@
+{
+ "RequirementsDiscussion": {
+  "roles": [
+   "product_manager"
+  ],
+  "agents": {
+   "product_manager": {
+    "tools": [],
+    "prompt": "prompts/product_manager.txt"
+   }
+  }
+ },
+ "Design": {
+  "roles": [
+   "chief_technology_officer",
+   "chief_product_officer"
+  ],
+  "agents": {
+   "chief_technology_officer": {
+    "tools": [],
+    "prompt": "prompts/chief_technology_officer.txt",
+    "schema": "schemas/chief_technology_officer.json"
+   },
+   "chief_product_officer": {
+    "tools": [],
+    "prompt": "prompts/chief_product_officer.txt"
+   }
+  }
+ },
+ "Coding": {
+  "roles": [
+   "coder",
+   "integrator",
+   "tester"
+  ],
+  "agents": {
+   "coder": {
+    "tools": [
+     "read_file",
+     "write_file",
+     "run_code",
+     "todo_write",
+     "list_files"
+    ],
+    "prompt": "prompts/coder.txt"
+   },
+   "integrator": {
+    "tools": [
+     "read_file",
+     "write_file",
+     "run_code",
+     "list_files"
+    ],
+    "prompt": "prompts/integrator.txt"
+   },
+   "tester": {
+    "tools": [
+     "read_file",
+     "write_file",
+     "run_code",
+     "run_tests",
+     "todo_write"
+    ],
+    "prompt": "prompts/tester.txt"
+   }
+  }
+ },
+ "Verification": {
+  "roles": [
+   "reviewer",
+   "fixer"
+  ],
+  "lenses": [
+   {
+    "name": "Security",
+    "focus": "Find security vulnerabilities: injection, unsafe deserialization, missing auth checks. Report file name and line number."
+   },
+   {
+    "name": "Performance",
+    "focus": "Find performance issues: O(n²) loops, memory leaks, unnecessary allocations, blocking I/O. Report file name and line number."
+   },
+   {
+    "name": "Logic",
+    "focus": "Find logic bugs: edge cases, off-by-one errors, incorrect error handling, race conditions. Report file name and line number."
+   },
+   {
+    "name": "Correctness",
+    "focus": "Verify the implementation matches the expected behaviour. Check that functions return correct values, edge cases are handled, and module contracts are fulfilled. Run the code and inspect inputs/outputs if needed. Report file name and line number for any behavioural defects."
+   }
+  ],
+  "agents": {
+   "reviewer": {
+    "tools": [
+     "read_file",
+     "list_files",
+     "run_code",
+     "search_web"
+    ],
+    "prompt": "prompts/reviewer.txt",
+    "schema": "schemas/reviewer.json"
+   },
+   "fixer": {
+    "tools": [
+     "read_file",
+     "write_file",
+     "run_code",
+     "run_tests",
+     "todo_write"
+    ],
+    "prompt": "prompts/fixer.txt"
+   }
+  }
+ },
+ "Documentation": {
+  "roles": [
+   "dependency_analyst",
+   "technical_writer"
+  ],
+  "agents": {
+   "dependency_analyst": {
+    "tools": [],
+    "prompt": "prompts/dependency_analyst.txt"
+   },
+   "technical_writer": {
+    "tools": [],
+    "prompt": "prompts/technical_writer.txt",
+    "max_tokens": 16384
+   }
+  }
+ },
+ "QualityGate": {
+  "roles": [
+   "inspector"
+  ],
+  "agents": {
+   "inspector": {
+    "tools": [
+     "read_file",
+     "list_files",
+     "run_code"
+    ],
+    "prompt": "prompts/inspector.txt",
+    "schema": "schemas/inspector.json"
+   }
+  }
+ },
+ "Iterate": {
+  "roles": [
+   "iteration_engineer"
+  ],
+  "agents": {
+   "iteration_engineer": {
+    "tools": [
+     "read_file",
+     "write_file",
+     "run_code",
+     "run_tests",
+     "todo_write",
+     "list_files"
+    ],
+    "prompt": "prompts/iteration_engineer.txt"
+   }
+  }
+ }
+}

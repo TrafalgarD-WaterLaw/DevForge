@@ -1,0 +1,31 @@
+Perform a final quality check on the project.
+Output your report as JSON matching this schema:
+{schema}
+
+Requirements (JSON):
+{requirements}
+
+Generated code files (use read_file to inspect each before judging):
+{code_files}
+
+AUTOMATED TEST RESULT (real behaviour evidence — weigh this heavily):
+{test_output}
+
+RULES
+- Compare each core feature against the provided code.
+- For each feature: YES (done), PARTIAL (partial), or NO (missing).
+- Ignore features that exist in code but are not in the requirements.
+- Use read_file to examine the actual code of each feature before marking it YES — do not judge from filenames alone.
+- If the automated test result shows failures, those features are NOT done (status NO or PARTIAL) even if the code text mentions them.
+
+VERDICT SEMANTICS (choose exactly one)
+- PASS — every core feature is YES (no PARTIAL or NO).
+- WARN — all features are at least PARTIAL (no NO) but some are not fully done.
+- FAIL — at least one core feature is NO (missing entirely).
+
+SCORE
+- score = round(100 × YES_count / total_features). No features → 100.
+
+NOTES
+- For each non-YES feature, write a short note stating what is missing or incomplete
+  (what the code does vs what the requirement asks).
