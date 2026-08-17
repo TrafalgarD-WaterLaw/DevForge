@@ -43,12 +43,17 @@ class Agent:
         )
         tools: list[str] = []
         self._max_tokens: int | None = None
+        self._tool_rounds_override: int | None = None
         for phase in load_phases_config().values():
             agents = phase.get("agents", {})
             if config_key in agents:
                 tools = agents[config_key].get("tools", [])
                 self._max_tokens = agents[config_key].get("max_tokens")
+                self._tool_rounds_override = agents[config_key].get(
+                    "max_tool_rounds")
                 break
+        if self._tool_rounds_override:
+            self._max_tool_rounds = int(self._tool_rounds_override)
         self._tool_schemas = describe(tools) if tools else []
         system_prompt = load_roles_config().get(config_key, "")
         self._messages: list[dict] = [{"role": "system", "content": system_prompt}]
@@ -60,6 +65,10 @@ class Agent:
         the frontend stage panel marks the agent's window done (green) on it."""
         try:
             return self._react_inner(user_msg, json_mode=json_mode, stream=stream)
+        except Exception:
+            # 调试：react 内任意异常打印完整堆栈（定位崩溃点）
+            _logger.exception("[%s] react failed", self.name)
+            raise
         finally:
             from core.events import HookRegistry
 
@@ -353,13 +362,19 @@ class Agent:
             else:
                 seen[key] = tc["id"]
                 executed.append(tc)
+        # 质检阶段静默只读类工具事件（_quiet_tools 标志）：inspector
+        # 逐文件 read_file 会刷屏前端；run_code/run_tests 保留（用户要
+        # 看质检在"跑什么"）
+        quiet = bool(getattr(self.blackboard, "get", lambda k, d=None: d)(
+            "_quiet_tools", False))
         for tc in executed:
-            HookRegistry.trigger(
-                Events.TOOL_PRE_USE,
-                tool=tc["name"],
-                args=tc.get("args", {}),
-                agent=self.name,
-            )
+            if not (quiet and tc["name"] in ("read_file", "list_files")):
+                HookRegistry.trigger(
+                    Events.TOOL_PRE_USE,
+                    tool=tc["name"],
+                    args=tc.get("args", {}),
+                    agent=self.name,
+                )
 
         def run_one(tc: dict) -> tuple[str, str]:
             set_runtime(rt)
@@ -377,12 +392,13 @@ class Agent:
         for tid, src in reuse_of.items():
             results[tid] = results[src]
         for tc in tool_calls:
-            HookRegistry.trigger(
-                Events.TOOL_POST_USE,
-                tool=tc["name"],
-                result_preview=results[tc["id"]][:500],
-                agent=self.name,
-            )
+            if not (quiet and tc["name"] in ("read_file", "list_files")):
+                HookRegistry.trigger(
+                    Events.TOOL_POST_USE,
+                    tool=tc["name"],
+                    result_preview=results[tc["id"]][:500],
+                    agent=self.name,
+                )
             self._messages.append(
                 {"role": "tool", "tool_call_id": tc["id"], "content": results[tc["id"]]}
             )

@@ -12,7 +12,9 @@ You are the CTO. Design the complete product architecture:
    - purpose — one-sentence summary of what the module does
    - exports — the public API: functions with verb_noun names (e.g. count_words, read_file, parse_args), exact signatures, and a one-line docstring for each function
    - depends_on — list of other module names this module imports from
-   - files — suggested filenames for this module (module_name.py or module_name_sub.py)
+   - files — filenames with directory: a 3+ module project MUST use a src/
+     layout (e.g. "src/cli.py", "src/scanner.py"); a single-file tool may use
+     a flat "main.py". Never put every module flat in the root.
 
 Design the module contracts so they compose correctly:
 - Every function/class that one module imports from another must appear in that module's exports.
@@ -20,4 +22,8 @@ Design the module contracts so they compose correctly:
 - Use consistent naming across modules so future projects can find and reuse verified code.
 
 The CPO will review and provide feedback. Discuss until the CPO agrees.
-Keep the design minimal. Do not over-engineer.
+Keep the design minimal — but separate the core responsibilities into
+distinct modules: entry point (CLI parsing), scanning/discovery,
+planning/decision, and execution each deserve their own module even in a
+small tool (e.g. cli.py, scanner.py, organizer.py). A single module that
+does everything is under-engineered; aim for 2-4 modules per project.

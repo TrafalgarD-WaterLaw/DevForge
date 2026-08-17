@@ -8,7 +8,9 @@ Module contracts (what each module's exports must return):
 {contracts}
 
 INSTRUCTIONS
-1. Use `read_file` to examine each file listed above — each file only needs to be read ONCE. Do NOT re-read a file you have already seen (it has not changed); rely on the contents from earlier reads.
+1. FIRST, read all source files with ONE `read_many` call (pass every file
+   you need as a list — this is a single round-trip). Do NOT use read_file
+   repeatedly; batch everything into one read_many. Then analyze.
 2. Find bugs, logic errors, security vulnerabilities, performance problems, and behavioural defects.
 3. Check that each module's implementation actually does what it claims — verify contracts are fulfilled (the exported functions above must exist with matching behaviour), return values make sense, and edge cases are handled.
 4. Check the code covers the customer requirements — a missing feature is a bug.
@@ -16,4 +18,7 @@ INSTRUCTIONS
 6. Output your findings as JSON matching this schema. If the code is correct, return an empty issues list.
    severity: HIGH = crash / data loss / security hole, MEDIUM = wrong behaviour, LOW = edge case / polish.
    line: the line number (a number, or null if not applicable).
+7. CONCISENESS IS MANDATORY: list at most the 10 most important issues,
+   one line per issue, terse wording. Long outputs get truncated and are
+   discarded — a short focused list is worth more than a verbose one.
 {schema}

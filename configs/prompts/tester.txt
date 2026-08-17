@@ -8,16 +8,23 @@ Code files:
 {codes}
 
 WORKFLOW
-1. Use `read_file` to inspect each source file.
+1. Read this module's source files with ONE `read_many` call (the files are
+   listed in Code files above — pass them all in a single list, one
+   round-trip). Do NOT call read_file repeatedly. If a file seems missing,
+   use `list_files` to see the layout — do NOT guess paths.
 2. Write one test file per module: `test_<module>.py`, in the project root.
 3. Use pytest style — plain `assert`, functions named `test_*`.
 4. Cover EVERY exported function in the contracts:
    - normal input → expected output
    - edge cases (empty input, boundary values)
    - error handling (bad arguments raise / return sensible errors)
-5. Import the module exactly as the code defines it (e.g. `import counter`).
+5. Import the module exactly as the code defines it. If the module lives in
+   a subdirectory (e.g. `src/scanner.py`), write a `conftest.py` in the
+   project root that adds that directory to `sys.path` — then
+   `import scanner` works under pytest.
 6. Run the tests with `run_tests` (runs pytest over all test_*.py files;
-   pass the `entry` parameter for a single file).
+   pass the `entry` parameter for a single file). NEVER use `run_code` on
+   test files — `python test_x.py` does not collect tests and always fails.
 7. If a test fails, it means either the test is wrong or the code is broken —
    fix the TEST, never modify the source modules.  Report broken modules in
    your final message.
@@ -34,4 +41,8 @@ RULES
   - the failure reveals a real source bug → DO NOT weaken the assertion,
     leave the test failing and report the broken module in your final message
     (the fixer repairs source code, never tests).
+- NEVER create diagnostic scripts (_dump_*.py, _find_*.py, _search*.py,
+  probe*.py, _cat*.py, _tail*.py). If a file seems missing, use `list_files`
+  to inspect the layout and write a conftest.py for the right sys.path.
+  Every scratch file pollutes the deliverable.
 - Use `todo_write` to track progress.

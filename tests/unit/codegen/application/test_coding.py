@@ -124,8 +124,8 @@ def test_generate_tests_retries_on_assertion_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(coding, "agent", lambda key: _FakeTester())
     # 第一次失败（断言），第二次通过
     outputs = iter([
-        (True, "FAILED test_m.py::test_f - assert 2 == 1"),
-        (False, "All tests passed."),
+        (True, "FAILED test_m.py::test_f - assert 2 == 1", False),
+        (False, "All tests passed.", False),
     ])
     monkeypatch.setattr(verif_mod, "run_project_tests",
                         lambda *a, **k: next(outputs))
@@ -157,7 +157,7 @@ def test_generate_tests_no_retry_when_clean(monkeypatch, tmp_path):
 
     monkeypatch.setattr(coding, "agent", lambda key: _FakeTester())
     monkeypatch.setattr(verif_mod, "run_project_tests",
-                        lambda *a, **k: (False, "All tests passed."))
+                        lambda *a, **k: (False, "All tests passed.", False))
     coding._generate_tests(str(tmp_path))
     assert len(prompts) == 1                       # 只跑初次，无反馈
 

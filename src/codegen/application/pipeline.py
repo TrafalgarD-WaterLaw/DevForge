@@ -126,6 +126,22 @@ class Pipeline:
                       f"{verdict}（{len(missing)} 项未达标）after "
                       f"{self._qg_max} retries — delivering with failure flag",
                       flush=True)
+                # 未通过质检 → 清掉本 run 已写入的记忆（失败经验不入库）
+                directory = self.blackboard.get("directory", "")
+                if directory:
+                    try:
+                        from memory.infrastructure.chroma_store import MemoryStore
+                        project = (Path(directory).name
+                                   .split("_DevForge_", 1)[0])[:80]
+                        if project:
+                            MemoryStore(
+                                chroma_dir=self.blackboard.get("_memory_dir", "")
+                            ).delete_project(project)
+                            print(f"  [Memory] 质检未通过 — 已清除 {project} 的记忆",
+                                  flush=True)
+                    except Exception:
+                        _log.warning("Failed to delete memory for failed "
+                                     "project %s", directory)
         return i + 1
 
     # ── 运行中追加需求 / 预算 / git ────────────────────

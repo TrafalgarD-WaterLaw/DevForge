@@ -131,3 +131,8 @@ docs/                # Architecture and comparison documentation
 ## Acknowledgments
 
 Built on the CAMEL role-playing framework and inspired by ChatDev's multi-agent collaboration paradigm.
+
+## 运行提示
+
+- 像素办公室素材（背景图/角色小人）为本地持有资源，未随仓库分发（版权未知）。
+  本地运行不受影响：`web/public/sprites/` 保留在项目目录即可。

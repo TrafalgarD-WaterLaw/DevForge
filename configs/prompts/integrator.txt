@@ -1,17 +1,27 @@
 Project directory: {directory}
 
-You are integrating modules that were built in parallel. Read every source file, then verify and fix.
+You are integrating modules that were built in parallel. Verify and fix.
+
+SOURCE FILES TO CHECK (list — read them with ONE `read_many` call):
+{codes}
 
 CHECKLIST
 1. **Missing imports** — every `import X` or `from X import Y` must resolve to a file or installed package. If module A imports `auth.login` but `auth.py` exports `authenticate`, fix the import.
 2. **Interface mismatches** — check that cross-module calls match the CTO's contract:
    - Function names, argument counts, and types must agree.
    - Return values must be consumed correctly.
-3. **Duplicate definitions** — the same class or top-level function defined in two files → merge or rename.
-4. **Missing entry point** — if no file has `if __name__ == "__main__"`, the project won't run. Create a minimal one that wires the modules together.
-5. **Actually runs** — after every fix, run the entry point with `run_code`. If it crashes, the fix is incomplete.
+3. **Data flow must reach its consumer** — if module A produces a value
+   (config map, parsed settings, options) that module B accepts, trace the
+   call chain: is it actually passed through? A function that accepts a
+   parameter but whose caller passes nothing (falling back to defaults) is a
+   bug even though it imports and compiles. Fix the call site.
+4. **Duplicate definitions** — the same class or top-level function defined in two files → merge or rename.
+5. **Missing entry point** — if no file has `if __name__ == "__main__"`, the project won't run. Create a minimal one that wires the modules together.
+6. **Actually runs** — after every fix, run the entry point with `run_code`. If it crashes, the fix is incomplete.
+7. **Clean up scratch files** — delete any one-off diagnostic scripts left by other agents (e.g. `_verify_*.py`, `_check_*.py`, `_bootstrap.py`, `sanity.py`, `tiny.py`). Deliver ONLY the final source files.
 
 RULES
-- Use `read_file` to inspect files, `write_file` to apply corrections.
+- Use `write_file` to apply corrections; `run_code` to verify.
+- Read files with ONE `read_many` call (batch everything) — never repeated read_file.
 - Do NOT rewrite modules from scratch — make the smallest change that fixes each issue.
 - Stop after 3 fix-and-retry cycles (each cycle ≈ 3 tool calls; stay within the tool budget). Report remaining failures honestly.

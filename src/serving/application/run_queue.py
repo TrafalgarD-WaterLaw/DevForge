@@ -124,6 +124,16 @@ def run_pipeline(run_id: str, task: str, start_from: str = "",
             "qg_loops": chain.blackboard.get("quality_gate_loops", 0),
         })
     except Exception as exc:
-        fail_run(run_id, str(exc))
-        emit(run_id, {"event": "error", "timestamp": time.time(), "message": str(exc)})
+        # 完整 traceback 进错误信息 + 落盘 crash.log（调试阶段：定位崩溃点）
+        import traceback as _tb
+        detail = f"{str(exc)}\n{_tb.format_exc()[-2000:]}"
+        try:
+            with open("E:/projects/ChatDev/crash.log", "a",
+                      encoding="utf-8") as _f:
+                _f.write(f"\n=== {run_id} {time.time()} ===\n{detail}\n")
+        except Exception:
+            pass
+        fail_run(run_id, detail)
+        emit(run_id, {"event": "error", "timestamp": time.time(),
+                      "message": detail})
         raise

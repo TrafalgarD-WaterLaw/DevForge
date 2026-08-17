@@ -28,3 +28,8 @@ benchmarks/results.json
 benchmarks/results_all.json
 benchmarks/last_run.log
 benchmarks/.memory/
+demo_files/
+demo/
+
+# 素材图片（版权未知，本地持有）
+web/public/sprites/

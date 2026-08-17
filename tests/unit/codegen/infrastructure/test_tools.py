@@ -256,9 +256,11 @@ def test_ddg_html_parses_titles_snippets_urls(monkeypatch):
     assert "<b>" not in out[0]
 
 
-def test_sandbox_prefix_default_empty():
-    """默认直跑：sandbox 未配置 → 无前缀。"""
+def test_sandbox_prefix_sandbox_off_no_prefix(monkeypatch):
+    """sandbox 显式关闭 → 无前缀（直跑，危险扫描兜底）。"""
     from codegen.infrastructure.tools.registry import sandbox_prefix
+    monkeypatch.setattr("core.config.load_pipeline_config",
+                        lambda: {"tools": {"sandbox": ""}})
     assert sandbox_prefix("C:/proj") == []
 
 
@@ -269,8 +271,10 @@ def test_sandbox_prefix_docker(monkeypatch):
                         lambda: {"tools": {"sandbox": "docker"}})
     monkeypatch.setattr("codegen.infrastructure.tools.registry._docker_ok", True)
     prefix = sandbox_prefix("C:/proj")
-    assert prefix[0] == "docker"
-    assert "C:/proj:/work" in prefix
+    import os as _os
+    # _docker_exe 可能是 "docker"、"docker.exe" 或完整安装路径（Windows）
+    assert _os.path.basename(prefix[0]).startswith("docker")
+    assert "C:/proj:/work" in prefix             # 读写挂载（文件整理器要 move）
     assert prefix[-1] == "python"
 
 
@@ -281,6 +285,54 @@ def test_sandbox_prefix_docker_unavailable_falls_back(monkeypatch):
                         lambda: {"tools": {"sandbox": "docker"}})
     monkeypatch.setattr("codegen.infrastructure.tools.registry._docker_ok", False)
     assert sandbox_prefix("C:/proj") == []
+
+
+def test_sandbox_retries_after_daemon_failure(monkeypatch):
+    """daemon 探测失败后 30s 重试窗口内不重试，过窗口自动重探测
+    （Docker Desktop 启动中/重启场景 —— 否则整个会话永久回退宿主机）。"""
+    import time
+    import subprocess
+    from codegen.infrastructure.tools.registry import sandbox_prefix
+    monkeypatch.setattr("core.config.load_pipeline_config",
+                        lambda: {"tools": {"sandbox": "docker"}})
+    # 1. 重试窗口未到 → 仍回退（不重探测）
+    monkeypatch.setattr("codegen.infrastructure.tools.registry._docker_ok", False)
+    monkeypatch.setattr("codegen.infrastructure.tools.registry._docker_retry_at",
+                        time.time() + 100)
+    assert sandbox_prefix("C:/proj") == []
+    # 2. 过了窗口 → 重新探测，daemon 已就绪 → 走 docker
+    monkeypatch.setattr("codegen.infrastructure.tools.registry._docker_retry_at",
+                        time.time() - 1)
+    monkeypatch.setattr("codegen.infrastructure.tools.registry._find_docker",
+                        lambda: "docker")
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a[0], 0))
+    prefix = sandbox_prefix("C:/proj")
+    assert prefix and prefix[0].startswith("docker")
+    # 复位（monkeypatch 自动还原，但 _docker_ok 是模块级真实状态）
+    from codegen.infrastructure.tools.registry import _docker_ok
+    monkeypatch.setattr("codegen.infrastructure.tools.registry._docker_ok", None)
+
+
+def test_docker_script_installs_deps_then_runs(monkeypatch):
+    """docker_script：容器内先装 requirements 再跑入口（sh -c 脚本）。"""
+    from codegen.infrastructure.tools.registry import docker_script
+    monkeypatch.setattr("core.config.load_pipeline_config",
+                        lambda: {"tools": {"sandbox": "docker"}})
+    monkeypatch.setattr("codegen.infrastructure.tools.registry._docker_ok", True)
+    cmd = docker_script("C:/proj", "python main.py")
+    import os as _os
+    # _docker_exe 可能是 "docker"、"docker.exe" 或完整安装路径（Windows）
+    assert _os.path.basename(cmd[0]).startswith("docker")
+    assert "C:/proj:/work" in cmd                # 读写挂载（文件整理器要 move）
+    # 列表元素是 'devforge_pip_cache:/root/.cache/pip'（in 检查子串需 any）
+    assert any("devforge_pip_cache" in s for s in cmd)   # pip 缓存卷
+    assert cmd[-3:-1] == ["sh", "-c"]
+    assert "unset HTTP_PROXY" in cmd[-1]        # 容器内清代理（环境免疫）
+    assert cmd[-1].endswith("; python main.py")
+    # docker 不可用 → None（调用方回退宿主机）
+    monkeypatch.setattr("codegen.infrastructure.tools.registry._docker_ok", False)
+    assert docker_script("C:/proj", "x") is None
 
 
 def test_cov_args_venv_only():
@@ -308,6 +360,71 @@ def test_run_id_filter_attaches_run_id():
     rec2 = logging.LogRecord("t", logging.INFO, "", 0, "m", None, None)
     RunIdFilter().filter(rec2)
     assert rec2.run_id == "-"
+
+
+def test_read_file_rejects_internal_dirs(tmp_path):
+    """read_file 与 list_files 一致：.devforge/ 等内部目录不可读。"""
+    import codegen.infrastructure.tools.file_tools as ft
+    _setup_runtime(tmp_path)
+    for sub in (".devforge", ".task_outputs", ".git", ".venv", "__pycache__"):
+        d = os.path.join(tmp_path, sub)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "secret.txt"), "w") as f:
+            f.write("internal")
+        result = runtime().execute("read_file", {"filename": f"{sub}/secret.txt"})
+        assert "internal directory" in result, f"{sub} 未拦截: {result}"
+
+
+def test_scan_dangerous_code_detects_hostile_ops(tmp_path):
+    """宿主机直跑黑名单：命令执行/删除/动态代码/shell=True 全部识别。"""
+    from codegen.infrastructure.tools.code_tools import _scan_dangerous_code
+    cases = {
+        "os_system.py": "import os\nos.system('rm -rf /')\n",
+        "os_remove.py": "import os\nos.remove('x.txt')\n",
+        "shutil_rmtree.py": "import shutil\nshutil.rmtree('/')\n",
+        "eval_call.py": "eval('__import__(os)')\n",
+        "subprocess_shell.py": "import subprocess\nsubprocess.run('rm -rf /', shell=True)\n",
+        "path_unlink.py": "from pathlib import Path\nPath('x').unlink()\n",
+    }
+    for name, src in cases.items():
+        with open(os.path.join(tmp_path, name), "w") as f:
+            f.write(src)
+    findings = _scan_dangerous_code(tmp_path)
+    assert len(findings) >= len(cases), f"漏检: {findings}"
+
+
+def test_scan_dangerous_code_allows_safe_ops(tmp_path):
+    """安全代码不误报：文件读写/纯列表 subprocess/算法逻辑。"""
+    from codegen.infrastructure.tools.code_tools import _scan_dangerous_code
+    safe = {
+        "safe1.py": ("import os\n"
+                     "os.makedirs('out', exist_ok=True)\n"
+                     "with open('out/a.txt', 'w') as f: f.write('x')\n"),
+        "safe2.py": ("import subprocess\n"
+                     "subprocess.run(['python', '-c', 'print(1)'])\n"),
+        "safe3.py": ("def fib(n):\n"
+                     "    a, b = 0, 1\n"
+                     "    for _ in range(n): a, b = b, a + b\n"
+                     "    return a\n"),
+    }
+    for name, src in safe.items():
+        with open(os.path.join(tmp_path, name), "w") as f:
+            f.write(src)
+    assert _scan_dangerous_code(tmp_path) == []
+
+
+def test_run_code_refuses_hostile_code_when_no_docker(monkeypatch, tmp_path):
+    """sandbox 关闭时：含 os.system 的项目 run_code 直接拒绝执行。"""
+    import codegen.infrastructure.tools.code_tools as ct
+    monkeypatch.setattr("core.config.load_pipeline_config",
+                        lambda: {"tools": {"sandbox": ""}})
+    monkeypatch.setattr("codegen.infrastructure.tools.registry._docker_ok", False)
+    _setup_runtime(tmp_path)
+    with open(os.path.join(tmp_path, "main.py"), "w") as f:
+        f.write("import os\nos.system('echo pwned')\nprint('done')\n")
+    result = runtime().execute("run_code", {"entry": "main.py"})
+    assert "Execution refused" in result
+    assert "os.system" in result
 
 
 def test_ensure_pytest_probes_cov(monkeypatch):

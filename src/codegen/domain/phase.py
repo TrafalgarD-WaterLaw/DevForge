@@ -48,7 +48,14 @@ class Phase:
         # Memory injection
         if "{memories}" in raw:
             extra.setdefault("memories", self._load_memories(key, **extra))
-        return raw.format(**extra)
+        try:
+            return raw.format(**extra)
+        except KeyError as exc:
+            # 调试：缺占位符时的完整堆栈（含 raw 与 extra 键）
+            _log.exception(
+                "Prompt format failed %s/%s: missing key %s — extra keys: %s",
+                phase_name, key, exc, sorted(extra.keys()))
+            raise
 
     def _load_memories(self, agent_key: str, **extra) -> str:
         """Retrieve relevant memories for *agent_key*.

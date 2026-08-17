@@ -13,6 +13,51 @@ from codegen.domain.registry import register_phase
 
 _log = logging.getLogger(__name__)
 
+# Python 2 遗留标准库名（3.10+ 的 sys.stdlib_module_names 已移除，
+# 但它们不是 PyPI 包，pip install 必然失败）—— 依赖检测必须排除
+_LEGACY_STDLIB = {
+    "urllib2", "urlparse", "xmlrpclib", "htmlentitydefs", "httplib",
+    "dummy_thread", "dummy_threading", "Queue", "StringIO", "ConfigParser",
+    "HTMLParser", "thread", "imp", "copy_reg", "cPickle", "cStringIO",
+    "anydbm", "dbhash", "dumbdbm", "gdbm", "whichdb", "md5", "sha",
+    "mutex", "new", "ni", "popen2", "posixfile", "repr", "sets",
+    "sre", "sre_compile", "sre_constants", "sre_parse", "statvfs",
+    "symbol", "token", "user", "compiler", "formatter", "fpformat",
+    "imageop", "imputil", "linuxaudiodev", "sunaudiodev", "xdrlib",
+    "audiodev", "sgmllib", "svn", "nntplib", "SocketServer",
+    "BaseHTTPServer", "SimpleHTTPServer", "CGIHTTPServer", "cookielib",
+    "gopherlib", "mimetools", "mimify", "multifile", "netrc", "poplib",
+    "robotparser", "smtplib", "telnetlib", "urlgrabber", "xmllib",
+    "pkg_resources", "pkgutil",
+}
+# 随解释器自带、非项目依赖的包（pip install 会装错对象/浪费等待）
+_BUNDLED_TOOLS = {"pip", "setuptools", "wheel"}
+# 无意义 import 名（虚词/超短名 —— 模型偶发在代码里写垃圾 import）
+_JUNK_IMPORT_WORDS = {
+    "a", "an", "the", "of", "for", "with", "in", "on", "at", "to",
+    "from", "within", "into", "this", "that", "other", "another",
+    "index", "name", "value", "data", "user", "test", "main", "utils",
+    "util", "helper", "helpers", "config", "settings", "db", "app",
+}
+
+def _is_junk_import(name: str) -> bool:
+    """True = 该 import 名不可能是 PyPI 包（虚词/单字符/带特殊形态）。"""
+    return (name.lower() in _JUNK_IMPORT_WORDS
+            or len(name) <= 2
+            or name in _BUNDLED_TOOLS)
+
+def _is_collection_error(output: str) -> bool:
+    """pytest 输出是否为 collection/import 阶段失败（不是断言失败）。
+
+    collection 错误特征：ModuleNotFoundError/ImportError/AttributeError
+    在收集阶段、'errors during collection'、'collected 0 items'。
+    """
+    return any(m in output for m in (
+        "ModuleNotFoundError", "ImportError",
+        "errors during collection", "collection failed",
+        "collected 0 items",
+    ))
+
 @register_phase
 class Coding(Phase):
     """Build each module from Design in parallel, then merge."""
@@ -32,6 +77,9 @@ class Coding(Phase):
             if exports
             else "No public API defined — design your own."
         )
+        # Design 指定的落盘路径（如 src/cli.py）必须传给 coder——
+        # 否则 coder 凭自己判断全写到项目根目录，src/ 布局形同虚设
+        files_text = ", ".join(mod.get("files", [])) or f"{mod.get('name', 'main')}.py"
         return self.prompt(
             "coder",
             module_name=mod.get("name", ""),
@@ -39,6 +87,7 @@ class Coding(Phase):
             module_deps=", ".join(mod.get("depends_on", [])) or "none",
             module_consumers=downstream or "none",
             module_exports=exports_text,
+            module_files=files_text,
             language=self.blackboard.get("language") or "Python",
         )
 
@@ -116,7 +165,9 @@ class Coding(Phase):
         )
         HookRegistry.trigger("integration_start")
         merger = self.agent("integrator")
-        merger.react(self.prompt("integrator", directory=directory))
+        # 文件列表给 integrator（工具方案：read_many 一次读全部源码）
+        merger.react(self.prompt(
+            "integrator", directory=directory, codes=self.files))
         if directory:
             self.blackboard.reload_codes(directory)
             print(
@@ -190,66 +241,123 @@ class Coding(Phase):
         """Tester agent writes test_*.py for every module contract.
 
         测试质量闭环：写完必须真跑通 —— 任何失败（collection/import/
-        断言）反馈 tester 重试 ≤2 次。区分两类失败：
+        断言）反馈 tester 重试 ≤1 次。区分两类失败：
         - 测试写错（期望值错/import 错/fixture 误用）→ 修测试
         - 测试揭示源码真 bug → 不弱化断言，留报告给 fixer（修源码）
+
+        成本控制：一次 react 写全部模块测试（read_many 批量读代码 +
+        逐文件 write_file + run_tests 验证）—— 每模块单独一轮 react
+        会让工具循环 × 模块数（48 次调用、72 万 tokens），单轮收敛
+        到 ~10 次调用。
         """
         modules = self.blackboard.get("modules", [])
         if not modules:
             return
-        contracts = "\n".join(
-            (
-                f"- {m.get('name', '?')}: "
-                + "; ".join(
-                    (
-                        f"{e.get('name', '')}{e.get('signature', '')}"
-                        for e in m.get("exports", [])
-                    )
-                )
-                or "- no exports defined"
-                for m in modules
-            )
-        )
         tester = self.agent("tester")
-        tester.react(
+        language = self.blackboard.get("language") or "Python"
+        tester_report = ""
+        # 全部模块的文件清单 + 契约（工具方案：tester 用 read_many 一次读全部）
+        all_files = []
+        contracts_lines = []
+        for mod in modules:
+            name = mod.get("name", "")
+            files = [f for f in (mod.get("files") or []) if isinstance(f, str)] \
+                or [f"{name or 'main'}.py"]
+            all_files.extend(files)
+            exports = mod.get("exports", [])
+            contracts_lines.append(
+                f"- {name}: " + "; ".join(
+                    f"{e.get('name', '')}{e.get('signature', '')}"
+                    for e in exports
+                ) or "- no exports defined"
+            )
+        tester_report = self._tester_react_result(
+            tester,
             self.prompt(
                 "tester",
-                codes=self.codes,
-                contracts=contracts,
-                language=self.blackboard.get("language") or "Python",
-            )
+                codes=", ".join(dict.fromkeys(all_files)),
+                contracts="\n".join(contracts_lines),
+                language=language,
+            ),
         )
-        self.blackboard.reload_codes(directory)
         from codegen.application.phases.verification import run_project_tests
 
-        for attempt in (1, 2):
-            has_bugs, output = run_project_tests(
-                directory,
-                self._run_process,
-                entry_point=self.blackboard.get("entry_point", ""),
-            )
-            if not has_bugs:
-                break
-            last_line = (
-                output.strip().splitlines()[-1][:100]
-                if output.strip()
-                else "(no output)"
-            )
-            print(
-                f"  [Tester] 测试失败（第 {attempt} 次反馈）: {last_line}", flush=True
-            )
-            tester.react(
-                f"Your tests FAILED with the following output:\n{output[:1500]}\n\nAnalyze each failure:\n- If the TEST is wrong (wrong expected value, wrong import, fixture misuse, collection error): fix the TEST file.\n- If the test reveals a REAL BUG in the source code: DO NOT weaken or delete the test — leave it failing and write a clear report of the broken module/function in your final message (the fixer will repair the source later).\nRe-run with run_tests. Every remaining failure must be either fixed or explicitly reported."
-            )
-            self.blackboard.reload_codes(directory)
+        # 新测试方案：失败分流，tester 最多反馈 1 次。
+        # - import/collection 错误 = 源码接口问题（tester 改不了）→ 直接报告
+        # - 断言失败 → 反馈 1 次修测试 → 仍失败 = 源码 bug → 报告转 fixer
+        has_bugs, output, infra_failed = run_project_tests(
+            directory,
+            self._run_process,
+            entry_point=self.blackboard.get("entry_point", ""),
+        )
+        if has_bugs and not infra_failed:
+            if _is_collection_error(output or ""):
+                tester_report = self._collection_error_report(output or "")
+                print("  [Tester] 测试 collection/import 失败 — 源码接口问题，"
+                      "直接转 fixer", flush=True)
+            else:
+                last_line = (
+                    (output or "").strip().splitlines()[-1][:100]
+                    if (output or "").strip()
+                    else "(no output)"
+                )
+                print(
+                    f"  [Tester] 测试失败（反馈 1 次）: {last_line}", flush=True
+                )
+                tester_report = self._tester_react_result(
+                    tester,
+                    f"Your tests FAILED with the following output:\n{(output or '')[:1500]}\n\nAnalyze each failure:\n- If the TEST is wrong (wrong expected value, wrong import, fixture misuse): fix the TEST file.\n- If the test reveals a REAL BUG in the source code: DO NOT weaken or delete the test — leave it failing and write a clear report of the broken module/function in your final message (the fixer will repair the source later).\nRe-run with run_tests. You have ONE chance to fix the tests; remaining failures go to the fixer.",
+                )
+                self.blackboard.reload_codes(directory)
+                has_bugs, output, infra_failed = run_project_tests(
+                    directory,
+                    self._run_process,
+                    entry_point=self.blackboard.get("entry_point", ""),
+                )
+                if has_bugs and not infra_failed:
+                    print("  [Tester] 修测试后仍失败 — 源码 bug，报告转 fixer",
+                          flush=True)
+        # 把 tester 的最终分析留给 fixer（源码 bug 报告不丢失）
+        if tester_report:
+            self.blackboard["tester_report"] = tester_report
+
+    @staticmethod
+    def _collection_error_report(output: str) -> str:
+        """import/collection 失败 → 直接给 fixer 的报告（tester 改不了源码）。"""
+        return ("Tests failed at COLLECTION/IMPORT stage — the test files "
+                "cannot even import the modules. This is a SOURCE interface "
+                "problem (missing module, missing export, wrong signature), "
+                "not a test problem:\n"
+                + output[:1500])
+
+    @staticmethod
+    def _tester_react_result(tester, prompt: str) -> str:
+        """跑 tester 并提取其最终消息（分析报告会传给 fixer）。"""
+        try:
+            result = tester.react(prompt)
+        except Exception:
+            return ""
+        if not result:
+            return ""
+        if isinstance(result, dict):
+            content = result.get("content") or result.get("message") or ""
+            return str(content)[:2000]
+        return str(result)[:2000]
 
     @staticmethod
     def _scan_imports(directory: str, own_modules: tuple[str, ...] = ()) -> list[str]:
         """Scan non-stdlib imports, excluding the project's own module names
-        (B6: 本地模块如 "counter" 不是 PyPI 包，不能 pip install）。"""
-        stdlib = (
-            sys.stdlib_module_names if hasattr(sys, "stdlib_module_names") else set()
+        (B6: 本地模块如 "counter" 不是 PyPI 包，不能 pip install）。
+
+        误报过滤三层：当前版本 stdlib、Python 2 遗留 stdlib 名
+        （urllib2/Queue/ConfigParser 等已从 3.10+ 的 stdlib_module_names
+        移除，会被当成第三方）、以及无意义词（单字母/虚词——import
+        语句解析到 "the"/"within" 说明代码或匹配本身有问题，不应安装）。
+        """
+        stdlib = set(
+            sys.stdlib_module_names if hasattr(sys, "stdlib_module_names") else ()
         )
+        stdlib.update(_LEGACY_STDLIB)
         own = set(own_modules)
         packages: set[str] = set()
         import_re = re.compile("^\\s*(?:from|import)\\s+(\\w+)", re.MULTILINE)
@@ -268,6 +376,7 @@ class Coding(Phase):
                                     name not in stdlib
                                     and (not name.startswith("_"))
                                     and (name not in own)
+                                    and not _is_junk_import(name)
                                 ):
                                     packages.add(name)
                     except (OSError, UnicodeError):
@@ -275,10 +384,11 @@ class Coding(Phase):
         return sorted(packages)
 
     def _auto_install(self, directory: str):
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         from codegen.infrastructure.tools.registry import runtime
 
         own_modules = tuple(
-            (m.get("name", "") for m in self.blackboard.get("modules", []))
+            m.get("name", "") for m in self.blackboard.get("modules", [])
         )
         packages = self._scan_imports(directory, own_modules=own_modules)
         if not packages:
@@ -289,25 +399,34 @@ class Coding(Phase):
             if venv_dir
             else "pip"
         )
-        installed: list[str] = []
-        for pkg in packages:
+
+        def install_one(pkg: str) -> tuple[str, bool]:
+            """pip install 单个包 → (pkg, ok)。并行 4 路，失败不刷屏。"""
             try:
                 r = subprocess.run(
-                    [pip, "install", pkg], capture_output=True, timeout=60, check=False
+                    [pip, "install", "--no-input", pkg],
+                    capture_output=True, timeout=90, check=False,
                 )
             except (subprocess.TimeoutExpired, OSError):
+                return pkg, False
+            return pkg, r.returncode == 0
+
+        # 并行安装：串行 40 个假依赖每个等超时是"很慢"的主要来源之一
+        results = []
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {pool.submit(install_one, p): p for p in packages}
+            for fut in as_completed(futures):
+                try:
+                    results.append(fut.result())
+                except Exception:  # noqa: BLE001 —— 单包失败不拖垮整批安装
+                    results.append((futures[fut], False))
+
+        installed: list[str] = []
+        failed: list[str] = []
+        for pkg, ok in results:
+            if not ok:
+                failed.append(pkg)
                 _log.warning("pip install failed for %s in %s", pkg, directory)
-                print(
-                    f"  [Coding] ⚠️ 依赖安装失败: {pkg}（网络或包名问题）— 交付项目可能缺依赖，requirements.txt 未记录",
-                    flush=True,
-                )
-                continue
-            if r.returncode != 0:
-                _log.warning("pip install failed for %s in %s", pkg, directory)
-                print(
-                    f"  [Coding] ⚠️ 依赖安装失败: {pkg}（pip 退出码 {r.returncode}）— 交付项目可能缺依赖",
-                    flush=True,
-                )
                 continue
             version = ""
             try:
@@ -325,6 +444,14 @@ class Coding(Phase):
             except (subprocess.TimeoutExpired, OSError):
                 pass
             installed.append(f"{pkg}=={version}" if version else pkg)
+        if failed:
+            # 失败合并成一条警告，不再每个包刷一行
+            print(
+                f"  [Coding] ⚠️ {len(failed)} 个依赖安装失败: "
+                f"{', '.join(failed[:10])}{' …' if len(failed) > 10 else ''}"
+                "（网络/包名问题）— 交付项目可能缺依赖",
+                flush=True,
+            )
         if installed:
             req_path = os.path.join(directory, "requirements.txt")
             existing = ""

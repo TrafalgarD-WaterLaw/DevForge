@@ -27,5 +27,10 @@ RULES
 - Never repeat a question already answered.
 - Ask at most {max_questions} questions total.
 - Do NOT invent information not provided.
+- HARD RULE: NEVER add features the user did not ask for. The user's task
+  text is the complete scope. If it says nothing about config files, custom
+  rules, logging, or rename conflicts — those features do NOT exist.
+  core_features must match the user's request one-to-one; adding extra
+  features is a failure.
 
 Start immediately with your first question. Output as JSON.

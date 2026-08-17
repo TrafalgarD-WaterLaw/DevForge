@@ -23,7 +23,7 @@ def _run_review(monkeypatch, agent, data):
     monkeypatch.setattr(
         Verification, "agent",
         lambda self, key, *, tag="": MagicMock(name=tag or key))
-    monkeypatch.setattr(Verification, "_run_tests", lambda self: (False, "ok"))
+    monkeypatch.setattr(Verification, "_run_tests", lambda self: (False, "ok", False))
     Verification(bb).run()
     return bb
 
@@ -78,7 +78,7 @@ def test_review_tasks_use_json_mode(monkeypatch):
     monkeypatch.setattr(verif_mod, "parallel", fake_parallel)
     bb = Blackboard()
     bb["directory"] = ""
-    monkeypatch.setattr(Verification, "_run_tests", lambda self: (False, "ok"))
+    monkeypatch.setattr(Verification, "_run_tests", lambda self: (False, "ok", False))
     Verification(bb).run()
 
     tasks = captured["tasks"]
@@ -110,7 +110,7 @@ def test_all_reviews_discarded_not_silent_pass(monkeypatch):
     monkeypatch.setattr(
         Verification, "agent",
         lambda self, key, *, tag="": agents.append(key) or MagicMock(name=tag or key))
-    monkeypatch.setattr(Verification, "_run_tests", lambda self: (False, "ok"))
+    monkeypatch.setattr(Verification, "_run_tests", lambda self: (False, "ok", False))
 
     bb = Blackboard()
     bb["directory"] = ""
@@ -143,7 +143,7 @@ def test_review_round_and_loop_payloads(monkeypatch):
     monkeypatch.setattr(
         Verification, "agent",
         lambda self, key, *, tag="": MagicMock(name=tag or key))
-    monkeypatch.setattr(Verification, "_run_tests", lambda self: (True, "fail"))
+    monkeypatch.setattr(Verification, "_run_tests", lambda self: (True, "fail", False))
 
     bb = Blackboard()
     bb["directory"] = ""
@@ -170,7 +170,7 @@ def test_review_discarded_event(monkeypatch):
     monkeypatch.setattr(
         Verification, "agent",
         lambda self, key, *, tag="": MagicMock(name=tag or key))
-    monkeypatch.setattr(Verification, "_run_tests", lambda self: (True, "fail"))
+    monkeypatch.setattr(Verification, "_run_tests", lambda self: (True, "fail", False))
 
     bb = Blackboard()
     bb["directory"] = ""
@@ -204,7 +204,7 @@ def test_post_fix_tests_run_again(monkeypatch):
     HookRegistry.clear()
     test_calls = []
     monkeypatch.setattr(Verification, "_run_tests",
-                        lambda self: (test_calls.append(1), (False, "ok"))[1])
+                        lambda self: (test_calls.append(1), (False, "ok", False))[1])
 
     good = {"issues": [{"file": "a.py", "line": 1,
                         "severity": "HIGH", "description": "bug"}]}

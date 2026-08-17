@@ -6,6 +6,7 @@ Module name: {module_name}
 Module description: {module_desc}
 Modules this module imports: {module_deps}
 Modules that import this module: {module_consumers}
+Files to create (exact paths from the architect — write to these): {module_files}
 
 PUBLIC API CONTRACT (implement these exact signatures):
 {module_exports}
@@ -17,6 +18,15 @@ WORKFLOW
 3. Run the entry point with `run_code` to verify it compiles and runs.
 4. If it fails, analyze the error, fix the file, and re-run.
 5. Once the module passes, mark all tasks complete with `todo_write`.
+
+PARALLEL DEVELOPMENT (read this first)
+- Other modules are being written by other coders AT THE SAME TIME — their
+  files do NOT exist yet. NEVER `read_file` another module's file; it will
+  fail and you will waste a round.
+- The interfaces you need are in the PUBLIC API CONTRACT above. Code against
+  the contract, not against other files: `from scanner import scan_files` may
+  be the contract — write that import and implement your side. The integrator
+  reconciles mismatches later.
 
 NAMING RULES (enforced — memory retrieval depends on these)
 - Function names: verb_noun pattern. count_words, parse_args, read_file, format_result.
@@ -34,3 +44,7 @@ RULES
 - Only write files for THIS module — do not touch other modules.
 - Keep code clean, documented, and idiomatic.
 - Assume other modules will be implemented separately — import their expected interfaces.
+- ONLY write original code you author for this project. NEVER copy or paste
+  third-party library source files (colorama, requests, typing_extensions,
+  site-packages contents, etc.) into the project — write your own implementations
+  instead. Importing a library is fine; copying its source is not.

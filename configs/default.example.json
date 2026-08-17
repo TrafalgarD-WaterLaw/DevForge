@@ -6,9 +6,9 @@
     "api_key": "",
     "max_retries": 3,
     "max_tokens": 8192,
-    "max_context_chars": 60000,
+    "max_context_chars": 40000,
     "token_budget": 500000,
-    "token_budget_stop": 0,
+    "token_budget_stop": 700000,
     "max_tool_rounds": 16
   },
   "phase_retries": {
@@ -30,8 +30,8 @@
     "max_functions": 2000
   },
   "tools": {
-    "sandbox": "",
-    "max_tool_result_chars": 6000,
+    "sandbox": "docker",
+    "max_tool_result_chars": 3000,
     "max_events": 2000
   }
 }

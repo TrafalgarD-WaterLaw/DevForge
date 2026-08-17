@@ -17,17 +17,20 @@ _log = logging.getLogger(__name__)
 
 def run_project_tests(
     directory: str, run_process, entry_point: str = ""
-) -> tuple[bool, str]:
+) -> tuple[bool, str, bool]:
     """Run pytest（或入口）on *directory* — 验证与质检共用。
 
-    Returns (has_bugs, output)。*run_process* 是执行函数
-    (cmd, cwd, timeout) → (stdout_bytes, stderr_bytes, returncode)。
+    Returns (has_bugs, output, infra_failed)。
+    *infra_failed* = 测试基础设施不可用（pytest 装不上且入口也跑不通）——
+    测试没跑起来 ≠ 项目 bug，调用方不能据此判 FAIL 或进修复循环。
+    *run_process* 是执行函数 (cmd, cwd, timeout) →
+    (stdout_bytes, stderr_bytes, returncode)。
     """
     from codegen.infrastructure.tools.registry import (
         cov_args,
+        docker_script,
         ensure_pytest,
         runtime,
-        sandbox_prefix,
     )
 
     python = runtime().venv_python()
@@ -39,11 +42,21 @@ def run_project_tests(
             if f.startswith("test_") and f.endswith(".py")
         )
     )
-    if test_files and ensure_pytest(python):
-        prefix = sandbox_prefix(directory)
-        if prefix:
-            cmd = prefix + ["-m", "pytest", "-q", "--no-header", *test_files]
-        else:
+    if test_files:
+        # docker 沙箱：与 tester 工具同一条链路（docker_script 统一
+        # unset 代理 + pip 缓存卷），容器内自动补装 pytest —— 之前用
+        # 裸 sandbox_prefix 跑 pytest 导致"No module named pytest"
+        from codegen.infrastructure.tools.registry import docker_pytest_script
+        cmd = docker_script(directory, docker_pytest_script(test_files))
+        if cmd:
+            out, err, code = run_process(cmd, cwd, timeout=120)
+            output = (err + out).decode("utf-8", errors="replace")
+            if code == 0:
+                return (False, "All tests passed.", False)
+            return (True, output.replace(directory.replace("\\", "/") + "/", ""),
+                    False)
+        # 宿主机直跑：venv 必须装好 pytest
+        if ensure_pytest(python):
             cmd = [
                 python,
                 "-m",
@@ -53,12 +66,12 @@ def run_project_tests(
                 *cov_args(python, directory),
                 *test_files,
             ]
-        out, err, code = run_process(cmd, cwd, timeout=120)
-        output = (err + out).decode("utf-8", errors="replace")
-        if code == 0:
-            return (False, "All tests passed.")
-        return (True, output.replace(directory.replace("\\", "/") + "/", ""))
-    elif test_files:
+            out, err, code = run_process(cmd, cwd, timeout=120)
+            output = (err + out).decode("utf-8", errors="replace")
+            if code == 0:
+                return (False, "All tests passed.", False)
+            return (True,
+                    output.replace(directory.replace("\\", "/") + "/", ""), False)
         _log.warning("pytest unavailable in venv — falling back to entry")
     entry = entry_point or "main.py"
     if not os.path.exists(os.path.join(directory, entry)) and os.path.exists(
@@ -67,11 +80,15 @@ def run_project_tests(
         entry = "cli.py"
     out, err, code = run_process([python, entry], cwd, timeout=30)
     output = (err + out).decode("utf-8", errors="replace")
+    # 有测试文件但 pytest 装不上 → fallback 入口运行，结果不可信标记 infra
+    infra_failed = bool(test_files)
     if code == 0:
-        return (False, "The software ran successfully without errors.")
+        return (False, "The software ran successfully without errors.", infra_failed)
     if output and "Traceback" in output:
-        return (True, output.replace(directory.replace("\\", "/") + "/", ""))
-    return (bool(output), output or "Process exited with non-zero code.")
+        return (True, output.replace(directory.replace("\\", "/") + "/", ""),
+                infra_failed)
+    return (bool(output), output or "Process exited with non-zero code.",
+            infra_failed)
 
 @register_phase
 class Verification(Phase):
@@ -87,11 +104,15 @@ class Verification(Phase):
             HookRegistry.trigger("review_round", phase="Verification", loop=loop)
             self._pre_codes = dict(self.blackboard.codes)
             review_texts, discarded, valid = self._run_review_round(lenses, loop)
-            has_bugs, test_output = self._run_tests()
-            if not has_bugs and (not review_texts) and (not discarded):
+            has_bugs, test_output, infra_failed = self._run_tests()
+            # 测试基础设施失败（pytest 装不上/入口也跑不通）≠ 项目 bug：
+            # 没有 review 意见时不再为此单开 fix 轮（fixer 修不了环境问题）
+            if (not has_bugs or infra_failed) \
+                    and (not review_texts) and (not discarded):
                 break
             self._run_fix_round(
-                directory, review_texts, discarded, has_bugs, test_output
+                directory, review_texts, discarded,
+                has_bugs and not infra_failed, test_output,
             )
 
     def _run_review_round(self, lenses: list, loop: int) -> tuple[list[str], int, int]:
@@ -185,6 +206,9 @@ class Verification(Phase):
             else ""
         )
         rejected = self.blackboard.get("review_rejected", "")
+        # tester 在编码阶段的源码 bug 分析（哪个模块/函数坏了）——
+        # 拼进 test_output，fixer 不用从 pytest 原始输出里猜
+        tester_report = self.blackboard.get("tester_report", "")
         fixer.react(
             self.prompt(
                 "fixer",
@@ -192,6 +216,7 @@ class Verification(Phase):
                 reviews=(all_reviews or "No review issues.") + fixer_note,
                 test_output=test_output
                 + qg_feedback
+                + (f"\nTESTER REPORT:\n{tester_report}" if tester_report else "")
                 + (
                     f"\nUSER REJECTED your previous fix: {rejected}" if rejected else ""
                 ),
@@ -201,7 +226,7 @@ class Verification(Phase):
         if not directory:
             return
         self.blackboard.reload_codes(directory)
-        fixed_bugs, _ = self._run_tests()
+        fixed_bugs, _, _infra = self._run_tests()
         changed = [
             f for f, c in self.blackboard.codes.items() if self._pre_codes.get(f) != c
         ]
@@ -292,12 +317,11 @@ class Verification(Phase):
     def _run_tests(self):
         """Run pytest if test_*.py exist, else the entry point.
 
-        Returns (has_bugs, output)。提取为模块级 run_project_tests
-        。
+        Returns (has_bugs, output, infra_failed)。
         """
         directory = self.blackboard.get("directory", "")
         if not directory:
-            return (False, "No project directory — skipping tests.")
+            return (False, "No project directory — skipping tests.", False)
         return run_project_tests(
             directory,
             self._run_process,

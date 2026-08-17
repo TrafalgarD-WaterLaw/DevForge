@@ -18,6 +18,15 @@ def auth_token() -> str:
     return str(load_pipeline_config().get("auth_token", "") or "").strip()
 
 def create_app() -> FastAPI:
+    # Windows 控制台 GBK：agent print ⚠/emoji 会抛 UnicodeEncodeError
+    # 崩掉整个 run —— 统一 UTF-8 输出 + replace 兜底。
+    # 放 factory 入口：uvicorn reload 的 worker 只走 create_app（不走 main）
+    import sys as _sys
+    for _stream in (_sys.stdout, _sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     app = FastAPI(title="DevForge API", version="2.0.0")
     # allow_credentials=True + allow_origins=["*"] is rejected by browsers —
     # the API uses no cookies/auth, so credentials stay off .
@@ -50,11 +59,12 @@ def main():
                      "局域网内任何设备可访问并消耗你的 API key。"
                      "请在 configs/default.json 设置 auth_token。")
     app = create_app()
+    # reload=False：Windows 上 uvicorn reload 会产生多进程共享 8000、
+    # watcher 失效等混乱（改代码后需要手动重启）
     uvicorn.run(
         "serving.interfaces.app:create_app",
         host="0.0.0.0", port=8000,
-        reload=True,
-        reload_dirs=["src", "configs"],
+        reload=False,
         factory=True,
         log_level="info",
     )

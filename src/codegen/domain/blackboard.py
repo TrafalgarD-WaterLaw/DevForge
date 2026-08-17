@@ -11,6 +11,12 @@ from codegen.domain.contracts import Contract
 
 __all__ = ["Blackboard", "Contract"]   # Contract 兼容 re-export（收紧）
 
+# reload_codes 全量代码总字符上限（超限丢最大文件）——
+# 编码 agent 误拷第三方库时防止 tester/reviewer 上下文被撑爆
+_CODES_TOTAL_MAX = 300_000
+# get_codes 渲染进 prompt 的兜底上限
+_PROMPT_CODES_MAX = 100_000
+
 class Blackboard:
     """Shared workspace — the single source of truth for all pipeline data.
 
@@ -85,26 +91,53 @@ class Blackboard:
         parts = []
         for name, src in self.codes.items():
             parts.append(f"{name}\n```\n{src}\n```\n")
-        return "\n".join(parts)
+        text = "\n".join(parts)
+        # 兜底截断：即使 reload 限了总量，单次渲染仍可能大（如文档阶段
+        # 追加产物），超过即截断并注记 —— 600 万字符 prompt 的最后一层防线
+        if len(text) > _PROMPT_CODES_MAX:
+            text = (
+                text[:_PROMPT_CODES_MAX]
+                + f"\n…(代码过长，已截断 {len(text)} → {_PROMPT_CODES_MAX} 字符，"
+                  "文件列表见 file_list)"
+            )
+        return text
 
     def reload_codes(self, directory: str):
-        """Re-scan .py files from disk into ``self.codes``."""
+        """Re-scan .py files from disk into ``self.codes``.
+
+        超限保护：总字符超 _CODES_TOTAL_MAX 时按"最大文件优先丢弃"，
+        直到达标 —— 编码 agent 误把第三方库整包拷入项目时，超大文件
+        被丢出上下文，tester/reviewer 不再被几 MB 垃圾撑爆。
+        """
         import logging
         import os
         _log = logging.getLogger(__name__)
         _SKIP = {'.venv', '__pycache__', '.git', '.task_outputs', '.devforge'}
-        self.codes.clear()
-        for root, _dirs, files in os.walk(directory):
+        files: dict[str, str] = {}
+        for root, _dirs, files_iter in os.walk(directory):
             _dirs[:] = [d for d in _dirs if d not in _SKIP]
-            for f in files:
+            for f in files_iter:
                 if f.endswith(".py") and not f.startswith("test_"):
                     try:
                         path = os.path.join(root, f)
                         rel = os.path.relpath(path, directory)
                         with open(path, encoding="utf-8", errors="replace") as fh:
-                            self.codes[rel] = fh.read()
+                            files[rel] = fh.read()
                     except (OSError, UnicodeError):
                         _log.warning("Failed to read %s", path)
+        total = sum(len(s) for s in files.values())
+        if total > _CODES_TOTAL_MAX:
+            for name in sorted(files, key=lambda n: len(files[n]), reverse=True):
+                if total <= _CODES_TOTAL_MAX:
+                    break
+                dropped = len(files[name])
+                del files[name]
+                total -= dropped
+                _log.warning(
+                    "Dropped oversized file %s (%d chars) from code context",
+                    name, dropped,
+                )
+        self.codes = files
 
     def write_files(self, directory: str):
         """Persist codes and docs to disk (subdirs are created per file)."""

@@ -11,6 +11,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+# Windows 控制台默认 GBK：agent print ⚠/emoji 等 unicode 会抛
+# UnicodeEncodeError 把整个 run 崩掉 —— 统一 UTF-8 输出 + replace 兜底
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 from serving.interfaces.app import main  # noqa: E402
 
 if __name__ == "__main__":

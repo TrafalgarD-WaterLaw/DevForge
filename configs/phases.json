@@ -47,20 +47,24 @@
    "integrator": {
     "tools": [
      "read_file",
+     "read_many",
      "write_file",
      "run_code",
-     "list_files"
+     "list_files",
+     "delete_file"
     ],
     "prompt": "prompts/integrator.txt"
    },
    "tester": {
     "tools": [
      "read_file",
+     "read_many",
      "write_file",
      "run_code",
      "run_tests",
      "todo_write"
     ],
+    "max_tool_rounds": 8,
     "prompt": "prompts/tester.txt"
    }
   }
@@ -92,20 +96,24 @@
    "reviewer": {
     "tools": [
      "read_file",
+     "read_many",
      "list_files",
      "run_code",
      "search_web"
     ],
+    "max_tool_rounds": 8,
     "prompt": "prompts/reviewer.txt",
     "schema": "schemas/reviewer.json"
    },
    "fixer": {
     "tools": [
      "read_file",
+     "read_many",
      "write_file",
      "run_code",
      "run_tests",
-     "todo_write"
+     "todo_write",
+     "delete_file"
     ],
     "prompt": "prompts/fixer.txt"
    }
@@ -152,11 +160,13 @@
    "iteration_engineer": {
     "tools": [
      "read_file",
+     "read_many",
      "write_file",
      "run_code",
      "run_tests",
      "todo_write",
-     "list_files"
+     "list_files",
+     "delete_file"
     ],
     "prompt": "prompts/iteration_engineer.txt"
    }

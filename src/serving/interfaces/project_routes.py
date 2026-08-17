@@ -25,7 +25,8 @@ async def latest_checkpoint():
         return {"checkpoint": None}
     from codegen.application.chat_chain import artifact_path
     dirs = sorted(
-        [d for d in WAREHOUSE.iterdir() if d.is_dir()],
+        [d for d in WAREHOUSE.iterdir()
+         if d.is_dir() and _BENCH_MARKER not in d.name],
         key=lambda d: d.stat().st_mtime, reverse=True,
     )
     for d in dirs[:10]:
@@ -54,6 +55,8 @@ async def latest_checkpoint():
 _SKIP = {'.venv', '__pycache__', '.git', '.task_outputs', '.devforge'}
 # Pipeline-run artifacts — internal state, not part of the deliverable.
 _ARTIFACT_NAMES = {"run_events.json", "task.txt"}
+# 基准评测产物目录名标记（bench-*），不出现在项目列表/历史页
+_BENCH_MARKER = "_bench-"
 
 def _is_skipped(path: Path, base: Path) -> bool:
     """True when *path* sits under one of the skip dirs (venv etc.)."""

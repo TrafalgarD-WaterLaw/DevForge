@@ -21,19 +21,28 @@ class QualityGate(Phase):
         req = self.blackboard.get("requirements", {})
         if not req or not self.blackboard.codes:
             return
-        has_bugs, test_output = self._run_e2e_tests()
-        result = self._inspect(req, test_output)
-        result = self._apply_evidence_gates(result, has_bugs, test_output)
+        # 质检阶段静默工具事件（inspector read_file 刷屏）
+        self.blackboard["_quiet_tools"] = True
+        try:
+            has_bugs, test_output, infra_failed = self._run_e2e_tests()
+            result = self._inspect(req, test_output)
+            result = self._apply_evidence_gates(
+                result, has_bugs and not infra_failed, test_output)
+        finally:
+            self.blackboard["_quiet_tools"] = False
         self.blackboard["quality_gate"] = result
         HookRegistry.trigger("quality_gate", data=result)
 
     # ── 子步骤（二轮拆分：run 37 行 → 编排 + 子步骤）──
 
-    def _run_e2e_tests(self) -> tuple[bool, str]:
-        """A3: 真实跑测试作为行为证据（无目录则跳过）。"""
+    def _run_e2e_tests(self) -> tuple[bool, str, bool]:
+        """A3: 真实跑测试作为行为证据（无目录则跳过）。
+
+        Returns (has_bugs, test_output, infra_failed)。
+        """
         directory = self.blackboard.get("directory", "")
         if not directory:
-            return False, ""
+            return False, "", False
         from codegen.application.phases.verification import run_project_tests
 
         return run_project_tests(

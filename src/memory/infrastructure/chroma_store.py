@@ -197,6 +197,22 @@ class MemoryStore:
         print(f"  [Memory] cleared {total} entries", flush=True)
         return total
 
+    def delete_project(self, project: str) -> int:
+        """删除某项目全部记忆（两个 collection）。
+
+        质检最终未通过时清库 —— 失败的编码/审查经验不应留在记忆里
+        （recall 侧虽已排除未完成项目，但写入侧也不能留垃圾）。
+        """
+        total = 0
+        for col in (self._col_phases, self._col_functions):
+            try:
+                res = col.delete(where={"project": project})
+                if isinstance(res, list):
+                    total += len(res)
+            except Exception:
+                _log.exception("delete_project failed for %s", project)
+        return total
+
     def _completed_projects(self) -> set[str]:
         """有 QualityGate 记忆的项目 = 完整交付过。"""
         try:
