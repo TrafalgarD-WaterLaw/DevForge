@@ -592,10 +592,30 @@ describe('feed 阶段面板：完成/轮次/无效/审阅语义', () => {
   it('agent_done → 窗口标绿（coder 无 review_submitted 也能变绿）', () => {
     const { feed } = feedAt(0)
     feed.addEvent({ event: 'phase_start', phase: 'Coding' })
-    feed.addEvent({ event: 'agent_done', agent: 'counter' })
+    feed.addEvent({ event: 'agent_done', agent: 'counter', status: 'done' })
     const win = feed.items.find((i) => i.type === 'stage')
       ?.stage?.windows.find((w) => w.agent === 'counter')!
     expect(win.done).toBe(true)
+  })
+
+  it('agent_done terminated（工具轮次耗尽）→ 不标绿，标 ⚠️ 警示', () => {
+    const { feed } = feedAt(0)
+    feed.addEvent({ event: 'phase_start', phase: 'Coding' })
+    feed.addEvent({ event: 'agent_done', agent: 'counter', status: 'terminated' })
+    const win = feed.items.find((i) => i.type === 'stage')
+      ?.stage?.windows.find((w) => w.agent === 'counter')!
+    expect(win.done).toBe(false)
+    expect(win.invalid).toBe(true)
+  })
+
+  it('agent_done error（LLM 异常）→ 不标绿，标 ⚠️ 警示', () => {
+    const { feed } = feedAt(0)
+    feed.addEvent({ event: 'phase_start', phase: 'Coding' })
+    feed.addEvent({ event: 'agent_done', agent: 'counter', status: 'error' })
+    const win = feed.items.find((i) => i.type === 'stage')
+      ?.stage?.windows.find((w) => w.agent === 'counter')!
+    expect(win.done).toBe(false)
+    expect(win.invalid).toBe(true)
   })
 
   it('review_round 第 2 轮 → 清空窗口 + 轮次分隔线', () => {

@@ -11,6 +11,20 @@ _MAX_WRITE_CHARS = 500_000
 # 内部目录（与 list_files 一致）：pipeline 状态文件不出现在 agent 视野
 _READ_SKIP = {".venv", "__pycache__", ".git", ".task_outputs", ".devforge"}
 
+# 诊断脚本名黑名单：agent 反复写 _dump.py/_probe.py 等探查脚本（prompt
+# 禁止无效）—— 平台层硬拦截，探查请用 read_many/list_files
+_SCRATCH_PREFIXES = ("_dump", "_probe", "_find", "_check", "_search",
+                     "_cat", "_tail", "_read", "_verify", "_bootstrap",
+                     "_reinstall", "_which", "_run_", "_force", "_venv",
+                     "_install", "_smoke")
+_SCRATCH_NAMES = {"probe.py", "diag.py", "sanity.py", "tiny.py",
+                  "check.py", "show.py", "runner.py", "verify.py"}
+
+def _is_scratch_name(filename: str) -> bool:
+    base = os.path.basename(filename).lower()
+    return (base in _SCRATCH_NAMES
+            or any(base.startswith(p) for p in _SCRATCH_PREFIXES))
+
 def _safe_path(filename: str) -> str:
     """Resolve *filename* against the project root, rejecting path traversal."""
     root = os.path.realpath(runtime().project_dir)
@@ -22,7 +36,10 @@ def _safe_path(filename: str) -> str:
 
 @register(
     name="read_file",
-    description="Read a file's contents from the current project. Returns the file content or an error message.",
+    description="Read a file's contents from the current project. "
+                "Files already read this session return a short 'already "
+                "read' notice instead of the content again — read files "
+                "ONCE. For multiple files, use read_many in one call.",
     parameters={
         "type": "object",
         "properties": {
@@ -36,10 +53,18 @@ def _safe_path(filename: str) -> str:
     }
 )
 def read_file(filename: str) -> str:
+    rt = runtime()
     try:
         path = _safe_path(filename)
     except ValueError as e:
         return f"Error: {e}"
+    # 已读拦截：本 agent 本轮已读过该文件（read_file 或 read_many）→
+    # 不再重发内容（内容在对话历史里）。模型反复读同一文件是工具循环
+    # 里最贵的重复（12k 内容 × N 轮）；write_file 后记录失效可重读。
+    if rt.is_read(path):
+        return (f"(already read this session — the full content is in your "
+                "conversation history. Do NOT re-read it. If the earlier "
+                "result was truncated by compaction, use read_many once.)")
     if not os.path.exists(path):
         return f"Error: file '{filename}' does not exist in the project."
     rel = os.path.relpath(path, os.path.realpath(runtime().project_dir))
@@ -57,6 +82,7 @@ def read_file(filename: str) -> str:
     try:
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
+        rt.mark_read(path)
         return content if content else "(empty file)"
     except Exception as e:
         return f"Error reading '{filename}': {e}"
@@ -84,6 +110,10 @@ def write_file(filename: str, content: str) -> str:
         path = _safe_path(filename)
     except ValueError as e:
         return f"Error: {e}"
+    if _is_scratch_name(filename):
+        return (f"Error: '{filename}' looks like a diagnostic scratch file — "
+                "do NOT create it. Inspect the project with read_many/"
+                "list_files instead, and deliver only real source files.")
     if len(content) > _MAX_WRITE_CHARS:
         return (f"Error: '{filename}' would be {len(content)} chars — over the "
                 f"{_MAX_WRITE_CHARS} limit. You must write only your own source "
@@ -91,6 +121,8 @@ def write_file(filename: str, content: str) -> str:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
+    # 内容已变 → 已读记录失效（允许重新读取新内容）
+    runtime().invalidate_file(path)
     return f"Successfully wrote {len(content)} bytes to '{filename}'."
 
 # read_many 批量读取的上限：一次调用最多读的文件数 / 合并结果字符数
@@ -102,7 +134,9 @@ _MAX_BATCH_CHARS = 12_000
     description="Read MULTIPLE files in ONE call (batch). Pass the file "
                 "paths you need as a list — use this instead of repeated "
                 "read_file calls to save round-trips. Each file is returned "
-                "with its name as a header; output is truncated if huge.",
+                "with its name as a header; output is truncated if huge. "
+                "Files already read this session are reported as already-read "
+                "instead of re-returning content.",
     parameters={
         "type": "object",
         "properties": {
@@ -125,11 +159,18 @@ def read_many(files: list) -> str:
                 f"(got {len(files)}). Split into smaller batches.")
     parts: list[str] = []
     total = 0
+    rt = runtime()
     for filename in files:
         try:
             path = _safe_path(filename)
         except ValueError as e:
             parts.append(f"===== {filename} =====\nError: {e}")
+            continue
+        # 已读拦截（与 read_file 同一集合）：批量读里夹带已读文件
+        # 是模型常见重复，直接给提示不重发内容
+        if rt.is_read(path):
+            parts.append(f"===== {filename} =====\n(already read this session — "
+                         "see earlier result in the conversation)")
             continue
         rel = os.path.relpath(path, os.path.realpath(runtime().project_dir))
         if set(rel.split(os.sep)) & _READ_SKIP:
@@ -153,6 +194,7 @@ def read_many(files: list) -> str:
         except Exception as e:
             parts.append(f"===== {filename} =====\nError reading: {e}")
             continue
+        rt.mark_read(path)
         parts.append(f"===== {filename} =====\n{content}")
         total += len(content)
     result = "\n".join(parts)

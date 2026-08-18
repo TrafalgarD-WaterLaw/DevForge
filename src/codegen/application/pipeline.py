@@ -270,6 +270,12 @@ class Pipeline:
         # Memory: persist phase output for cross-project retrieval。
         # 异步（后台线程）—— ChromaDB upsert 较慢，同步做会卡住阶段边界
         #（用户观察：记忆更新完才继续下一步）。串行锁防并发写。
+        # 质检记忆门槛：仅 PASS 写入（WARN/FAIL 是"未达标经验"，会被
+        # _completed_projects 当成完成项目召回，污染后续项目）
+        qg = self.blackboard.get("quality_gate", {}) or {}
+        if phase_name == "QualityGate" and qg.get("verdict") != "PASS":
+            return
+
         def _write_memory():
             with _memory_lock:
                 try:

@@ -129,18 +129,14 @@ class ChatChain:
 
     def _init_runtime(self, out_dir: Path, start_from: str,
                       project_dir: str) -> None:
-        from codegen.infrastructure.tools.registry import ensure_venv, init
-        # 重跑（start_from）/迭代也指向已有 .venv：否则 venv_python 退回系统
-        # Python，生成代码的依赖（装在本项目 venv 里）全部丢失。
-        # ensure_venv 幂等 —— python.exe 已存在则直接返回，后台线程无副作用。
-        venv_dir = str(out_dir / ".venv")
-        if not start_from and not project_dir:
-            # 后台预创建：与需求讨论（PM 首问）并行，省掉提问前的 ~6s 等待。
-            # venv_python() 惰性兜底（锁内幂等），Coding 阶段前必然就绪。
-            threading.Thread(
-                target=ensure_venv, args=(venv_dir,), daemon=True,
-            ).start()
-        init(project_dir=str(out_dir), venv_dir=venv_dir)
+        from codegen.infrastructure.tools.registry import init
+        # 执行环境自包含：不再为项目创建 venv。
+        # - docker 模式：代码/测试跑在容器（容器内自动装依赖），项目
+        #   venv 无用（交付物不带 35MB .venv）
+        # - 宿主机模式：直接用 DevForge 根环境（sys.executable，自带
+        #   pytest）—— 零安装、零网络、零失败面（不再依赖现场建
+        #   venv + pip 装 pytest）
+        init(project_dir=str(out_dir), venv_dir="")
 
     @staticmethod
     def _sanitise_name(task: str | None) -> str:

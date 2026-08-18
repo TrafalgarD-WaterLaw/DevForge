@@ -332,6 +332,13 @@ export function createFeed(opts?: {
         // 子 agent 完成（coder/文档 writer…）→ 窗口标绿。
         // Reviewer 除外：审查者 react 结束 ≠ 审查完成（还要过 schema 校验，
         // 校验失败还会重试跑工具）—— 绿色只能来自 review_submitted。
+        // 仅 status=done（正常收尾）标绿 —— 工具轮次耗尽/LLM 错误
+        // 的强制收尾（terminated/error）不标绿，标 ⚠️ 警示。
+        if (e.status && e.status !== 'done') {
+          win.done = false
+          win.invalid = true
+          break
+        }
         if (!win.invalid && !win.agent.includes('Reviewer')) win.done = true
         break
       }

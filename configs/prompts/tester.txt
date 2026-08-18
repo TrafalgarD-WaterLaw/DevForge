@@ -1,5 +1,14 @@
 You are writing unit tests for a just-built project.
 
+AVAILABLE TOOLS (your only way to interact — never write scratch scripts):
+- read_many(files) — read files in ONE batch (preferred over read_file)
+- read_file(file) — single file
+- write_file(file, content) — write test files
+- run_tests(entry) — run pytest (your verification tool)
+- run_code(entry) — run the project entry (NOT test files)
+Inspect with read_many/list_files — NEVER create _dump.py/_probe.py
+diagnostic scripts to explore files.
+
 Language: {language}
 Module contracts (what each module promises to export):
 {contracts}
@@ -8,10 +17,12 @@ Code files:
 {codes}
 
 WORKFLOW
-1. Read this module's source files with ONE `read_many` call (the files are
-   listed in Code files above — pass them all in a single list, one
-   round-trip). Do NOT call read_file repeatedly. If a file seems missing,
-   use `list_files` to see the layout — do NOT guess paths.
+0. YOUR PRIMARY TASK is writing test files — you are NOT done until every
+   module has a `test_<module>.py` on disk. Budget your tool calls:
+   read files in ONE batch, then write ALL test files, then verify.
+1. Read the source files with ONE `read_many` call (all files in a single
+   list — one round-trip). Do NOT call read_file repeatedly and do NOT run
+   code; reading and running burn your tool budget before you write tests.
 2. Write one test file per module: `test_<module>.py`, in the project root.
 3. Use pytest style — plain `assert`, functions named `test_*`.
 4. Cover EVERY exported function in the contracts:

@@ -1,5 +1,14 @@
 You need to fix a module based on review feedback and test results.
 
+AVAILABLE TOOLS (your only way to interact — never write scratch scripts):
+- read_many(files) — read files in ONE batch (preferred)
+- read_file(file) — single file
+- write_file(file, content) — apply fixes
+- delete_file(file) — remove scratch files
+- run_code(entry) — verify the entry point
+- run_tests(entry) — verify with pytest
+Inspect with read_many — NEVER create _dump.py/_probe.py diagnostic scripts.
+
 PROJECT FILES:
 {codes}
 
@@ -16,6 +25,9 @@ WORKFLOW
 2. Then fix all HIGH and MEDIUM severity review issues (LOW at your discretion).
 3. Read the files you must fix with ONE `read_many` call (batch all files
    into a single list — one round-trip). Do NOT call read_file repeatedly.
+   Then plan the fixes BEFORE calling tools — each tool call is an LLM
+   round-trip. Batch: ONE read_many → ALL write_file fixes → ONE run_tests.
+   Do NOT re-read files you have already seen (they have not changed).
 4. Use `write_file` to overwrite corrected files (one per call).
 5. Run the module with `run_code`, then `run_tests` to confirm every fix.
 6. If it still fails, repeat (max 3 fix cycles).
@@ -29,6 +41,10 @@ RULES
 - NEVER create diagnostic scratch scripts (probe.py, diag.py, check_*.py,
   _*.py). Diagnose with read_file/run_code/run_tests directly — every extra
   file pollutes the deliverable. Delete any such files you find.
+- NO HALLUCINATED FIXES: claiming "fixed" without calling `write_file` is a
+  failure. Every reported issue must end with a write_file call that changed
+  the file — or an explicit explanation of why no change is needed. Saying
+  "I fixed X" when you did not modify any file is worse than not fixing.
 - CLI TOOLS: running the entry point with NO arguments is EXPECTED to fail
   (argparse prints "required arguments" and exits non-zero). That is not a
   bug. To verify a CLI works, run it with valid sample arguments (e.g.

@@ -39,7 +39,20 @@ class Iterate(Phase):
         removed = [f for f in before if f not in self.blackboard.codes]
         from codegen.application.phases.verification import Verification
 
-        has_bugs, test_output = Verification(self.blackboard)._run_tests()
+        has_bugs, test_output, _infra = Verification(self.blackboard)._run_tests()
+        # 回归失败 ≠ 交付：反馈 iteration_engineer 修复源码（≤1 次）——
+        # 之前只报告不修，用户追加需求改挂了现有功能也照样交付
+        if has_bugs and not _infra:
+            print("  [Iterate] 回归测试失败 — 反馈迭代工程师修复", flush=True)
+            from core.config import load_sys_message
+            engineer.react(load_sys_message(
+                "iteration_engineer_regression", output=test_output[:1500]))
+            self.blackboard.reload_codes(directory)
+            changed = [f for f, c in self.blackboard.codes.items()
+                       if before.get(f) != c]
+            removed = [f for f in before if f not in self.blackboard.codes]
+            has_bugs, test_output, _infra = \
+                Verification(self.blackboard)._run_tests()
         summary = {
             "message": f"迭代完成: 修改 {len(changed)} 个文件"
             + (f"，删除 {len(removed)} 个" if removed else "")

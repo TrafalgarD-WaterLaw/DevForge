@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import re
-import subprocess
 import sys
 from core.events import Events, HookRegistry
 from codegen.application.patterns import parallel
@@ -99,6 +98,59 @@ class Coding(Phase):
         self._generate_modules(modules)
         self._finalize(directory, total_modules, modules)
 
+    def _contracts_text(self) -> str:
+        """Format module contracts for the integrator prompt (compact)."""
+        contracts = self.blackboard.contracts
+        if not contracts:
+            return "(no contracts defined)"
+        lines = []
+        for name, c in contracts.items():
+            exports = "; ".join(
+                (f"{e.get('name', '')}{e.get('signature', '')}"
+                 for e in c.exports)
+            )
+            lines.append(f"- {name}: {exports or 'no exports'}")
+        return "\n".join(lines)
+
+    def _contract_gap_check(self, modules: list) -> str:
+        """平台级契约检查：AST 对比契约 exports vs 源码实际导出。
+
+        coder 在并行开发中反复改契约名（execute_moves→apply_move_plan、
+        scan_files→discover_files 已出现 3 次）—— integrator 靠自觉
+        检查不可靠，这里平台先做硬检查：契约声明但源码未定义的导出
+        生成缺口清单，注入 integrator prompt 强制修复（加别名即可）。
+        返回注入文本（无缺口返回 ""）。
+        """
+        directory = self.blackboard.get("directory", "")
+        if not directory:
+            return ""
+        gaps: list[str] = []
+        for mod in modules:
+            name = mod.get("name", "")
+            src_text = ""
+            for f in self._module_files(mod):
+                p = os.path.join(directory, f)
+                if os.path.exists(p):
+                    try:
+                        src_text += open(p, encoding="utf-8",
+                                         errors="replace").read()
+                    except OSError:
+                        pass
+            defined = set(re.findall(r"^\s*def\s+(\w+)", src_text, re.MULTILINE))
+            defined |= set(re.findall(r"^\s*class\s+(\w+)", src_text,
+                                      re.MULTILINE))
+            for e in mod.get("exports", []):
+                en = e.get("name", "")
+                if en and en not in defined:
+                    gaps.append(f"- {name}.{en} 契约声明但源码未定义")
+        if not gaps:
+            return ""
+        return ("\nPLATFORM CONTRACT CHECK — the following exports are "
+                "declared in the design but MISSING from the source. "
+                "Implement them now (as `def <name>(...)` or an alias "
+                "`<name> = <existing>`):\n"
+                + "\n".join(gaps) + "\n")
+
     def _filter_pending_modules(self, modules: list, directory: str) -> list:
         """B2 产物缓存：重跑（start_from）时已落盘的模块跳过重新生成。
 
@@ -123,12 +175,14 @@ class Coding(Phase):
 
     def _generate_modules(self, modules: list) -> None:
         """Build each module in parallel。"""
+        # stream 参数显式 False：coder 有工具（write_file 等），流式只在
+        # 无工具 agent 生效（react 内 stream_ok 条件），传 True 是无效的
         tasks = [
             (
                 self.agent("coder", tag=mod.get("name", "coder")),
                 self._module_prompt(mod),
                 False,
-                True,
+                False,
             )
             for mod in modules
         ]
@@ -165,9 +219,18 @@ class Coding(Phase):
         )
         HookRegistry.trigger("integration_start")
         merger = self.agent("integrator")
-        # 文件列表给 integrator（工具方案：read_many 一次读全部源码）
+        # 文件列表 + 模块契约 + 平台契约缺口清单给 integrator：
+        # 契约说 execute_moves、coder 实现叫 apply_move_plan 这类偏差
+        # integrator 是唯一能在联调阶段修复的角色。契约缺口由平台
+        # AST 硬检查得出（不依赖 integrator 自觉），强制修复。
+        contracts_text = self._contracts_text()
+        gaps = self._contract_gap_check(modules)
+        if gaps:
+            print("  [Coding] 平台契约检查发现缺口，已注入 integrator",
+                  flush=True)
         merger.react(self.prompt(
-            "integrator", directory=directory, codes=self.files))
+            "integrator", directory=directory, codes=self.files,
+            contracts=contracts_text + gaps))
         if directory:
             self.blackboard.reload_codes(directory)
             print(
@@ -178,43 +241,25 @@ class Coding(Phase):
             self._generate_tests(directory)
 
     @staticmethod
-    def _run_process(cmd, cwd, timeout):
-        """同 Verification._run_process 的轻量版（Coding 的 tester 复验用）。"""
-        try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=cwd,
-                stdin=subprocess.DEVNULL,
-                start_new_session=os.name != "nt",
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
-                if os.name == "nt"
-                else 0,
-            )
-            try:
-                return (*process.communicate(timeout=timeout), process.returncode)
-            except subprocess.TimeoutExpired:
-                try:
-                    process.kill()
-                except OSError:
-                    pass
-                out, err = process.communicate()
-                return (out, err, process.returncode)
-        except OSError as ex:
-            return (b"", str(ex).encode(), 1)
-
-    @staticmethod
     def _module_files(mod: dict) -> list[str]:
         """模块期望的落盘文件名（设计缺 files 时按惯例 name.py）。"""
         files = [f for f in mod.get("files", []) if isinstance(f, str)]
         return files or [f"{mod.get('name', 'main')}.py"]
 
     def _module_files_on_disk(self, mod: dict) -> bool:
-        """True = 模块的全部期望文件已落盘（可复用/可跳过）。"""
-        names = {os.path.basename(f) for f in self.blackboard.codes.keys()}
-        expected = {os.path.basename(f) for f in self._module_files(mod)}
-        return bool(expected) and expected.issubset(names)
+        """True = 模块的全部期望文件已落盘（可复用/可跳过）。
+
+        完整相对路径匹配（src/cli.py ≠ cli.py），比较前双方 normpath
+        规范化 —— 设计给的是正斜杠（"src/main.py"），磁盘 relpath 在
+        Windows 是反斜杠（"src\\main.py"），字符串直接比较必然全部误判
+        缺失 → 所有模块重试 2 次 → token 白烧 30 万+（c7cb1137 实况）。
+        之前按 basename 匹配规避了分隔符问题，但会误判同名文件。
+        """
+        on_disk = {os.path.normpath(f) for f in self.blackboard.codes.keys()}
+        expected = {os.path.normpath(f) for f in self._module_files(mod)}
+        if not expected:
+            return False
+        return expected.issubset(on_disk)
 
     def _retry_missing_modules(self, modules: list[dict]):
         """文件未落盘的模块用新 coder 重试（≤2 次）—— coder 偶发输出
@@ -230,8 +275,18 @@ class Coding(Phase):
                     f"  [Coding] {mod.get('name', '?')} 文件缺失 — 重试第 {attempt} 次",
                     flush=True,
                 )
+                # 重试是新 agent 实例（无对话历史），只给 162 字符的
+                # "重新写"消息会让 coder 不知道要写什么契约 —— 附加
+                # 完整模块 prompt（模块名/描述/契约/文件路径）
                 agent = self.agent("coder", tag=mod.get("name", "coder"))
-                retry_prompt = f"Your previous attempt did NOT write the required files to disk ({', '.join(self._module_files(mod))}). Write the COMPLETE module now using write_file — no placeholders, no partial output."
+                from core.config import load_sys_message
+                retry_prompt = (
+                    self._module_prompt(mod)
+                    + "\n\n"
+                    + load_sys_message(
+                        "coder_retry_missing_module",
+                        files=", ".join(self._module_files(mod)))
+                )
                 agent.react(retry_prompt, stream=True)
                 self.blackboard.reload_codes(directory)
                 if self._module_files_on_disk(mod):
@@ -285,14 +340,39 @@ class Coding(Phase):
         # 新测试方案：失败分流，tester 最多反馈 1 次。
         # - import/collection 错误 = 源码接口问题（tester 改不了）→ 直接报告
         # - 断言失败 → 反馈 1 次修测试 → 仍失败 = 源码 bug → 报告转 fixer
+        from codegen.application.process import run_process
+
+        # tester 兜底：react 后磁盘仍无任何 test_*.py（5f7fdc04 实况：
+        # tester 卡在 conftest 后停止，测试文件一个都没写，质检直接 NO）
+        # → 用专门提示重试 1 次，仍无则把问题留给后续阶段
+        has_tests = any(
+            f.startswith("test_") and f.endswith(".py")
+            for f in os.listdir(directory)
+        )
+        if not has_tests and tester_report:
+            print("  [Tester] 未产出任何测试文件 — 重试 1 次", flush=True)
+            tester._max_tool_rounds = min(tester._max_tool_rounds, 6)
+            tester_report = self._tester_react_result(
+                tester,
+                load_sys_message("tester_no_tests_retry"),
+            )
+            has_tests = any(
+                f.startswith("test_") and f.endswith(".py")
+                for f in os.listdir(directory)
+            )
+            if not has_tests:
+                print("  [Tester] 重试后仍无测试文件 — 问题留待后续阶段",
+                      flush=True)
+
         has_bugs, output, infra_failed = run_project_tests(
             directory,
-            self._run_process,
+            run_process,
             entry_point=self.blackboard.get("entry_point", ""),
         )
         if has_bugs and not infra_failed:
             if _is_collection_error(output or ""):
-                tester_report = self._collection_error_report(output or "")
+                tester_report = self._collection_error_report(
+                    output or "", directory)
                 print("  [Tester] 测试 collection/import 失败 — 源码接口问题，"
                       "直接转 fixer", flush=True)
             else:
@@ -304,14 +384,20 @@ class Coding(Phase):
                 print(
                     f"  [Tester] 测试失败（反馈 1 次）: {last_line}", flush=True
                 )
+                from core.config import load_sys_message
+                # 反馈轮限 5 轮：修测试 + 复测足够（之前 12 轮跑满，
+                # 反馈轮 10 次调用 ≈ 10 万 tokens 白烧）
+                tester._max_tool_rounds = min(tester._max_tool_rounds, 5)
                 tester_report = self._tester_react_result(
                     tester,
-                    f"Your tests FAILED with the following output:\n{(output or '')[:1500]}\n\nAnalyze each failure:\n- If the TEST is wrong (wrong expected value, wrong import, fixture misuse): fix the TEST file.\n- If the test reveals a REAL BUG in the source code: DO NOT weaken or delete the test — leave it failing and write a clear report of the broken module/function in your final message (the fixer will repair the source later).\nRe-run with run_tests. You have ONE chance to fix the tests; remaining failures go to the fixer.",
+                    load_sys_message(
+                        "tester_failure_feedback",
+                        output=(output or "")[:1500]),
                 )
                 self.blackboard.reload_codes(directory)
                 has_bugs, output, infra_failed = run_project_tests(
                     directory,
-                    self._run_process,
+                    run_process,
                     entry_point=self.blackboard.get("entry_point", ""),
                 )
                 if has_bugs and not infra_failed:
@@ -322,13 +408,55 @@ class Coding(Phase):
             self.blackboard["tester_report"] = tester_report
 
     @staticmethod
-    def _collection_error_report(output: str) -> str:
-        """import/collection 失败 → 直接给 fixer 的报告（tester 改不了源码）。"""
+    def _collection_error_report(output: str, directory: str) -> str:
+        """import/collection 失败 → 直接给 fixer 的报告（tester 改不了源码）。
+
+        平台层自动定位：解析输出里**所有** "cannot import name 'X' from 'Y'"
+        （不只第一个 —— fixer 修一个还有下一个、两轮修不好的根因之一），
+        对每个名字在项目里 grep 定义位置，生成完整修复清单。
+        """
+        hints = []
+        # 去重（pytest 输出同一错误可能重复出现）
+        seen = set()
+        for name, mod in sorted(
+                set(re.findall(r"cannot import name '(\w+)' from '(\w+)'",
+                               output or ""))):
+            if (name, mod) in seen:
+                continue
+            seen.add((name, mod))
+            found_in = None
+            for root, _dirs, files in os.walk(directory):
+                for f in files:
+                    if not f.endswith(".py") or f.startswith("test_"):
+                        continue
+                    path = os.path.join(root, f)
+                    try:
+                        src = open(path, encoding="utf-8",
+                                   errors="replace").read()
+                    except OSError:
+                        continue
+                    if re.search(rf"^\s*def {re.escape(name)}\b", src,
+                                 re.MULTILINE):
+                        found_in = os.path.relpath(path, directory)
+                        break
+                if found_in:
+                    break
+            if found_in:
+                hints.append(
+                    f"- '{name}' IS defined in '{found_in}' — the import "
+                    f"imports it from '{mod}' which is WRONG. Fix the import "
+                    "in the caller (or move the function).")
+            else:
+                hints.append(
+                    f"- '{name}' is NOT defined anywhere in the project — "
+                    f"it must be ADDED to '{mod}' (check the design contract "
+                    "for the intended signature).")
         return ("Tests failed at COLLECTION/IMPORT stage — the test files "
-                "cannot even import the modules. This is a SOURCE interface "
+                "cannot import the modules. This is a SOURCE interface "
                 "problem (missing module, missing export, wrong signature), "
-                "not a test problem:\n"
-                + output[:1500])
+                "not a test problem. Fix ALL of these:\n"
+                + ("\n".join(hints) if hints else "(no import hints found)")
+                + "\n\n" + (output or "")[:1500])
 
     @staticmethod
     def _tester_react_result(tester, prompt: str) -> str:
@@ -362,8 +490,12 @@ class Coding(Phase):
         packages: set[str] = set()
         import_re = re.compile("^\\s*(?:from|import)\\s+(\\w+)", re.MULTILINE)
         _SKIP = {".venv", "__pycache__", ".git", ".task_outputs", ".devforge"}
-        for root, _dirs, files in os.walk(directory):
-            _dirs[:] = [d for d in _dirs if d not in _SKIP]
+        for root, dirs, files in os.walk(directory):
+            dirs[:] = [d for d in dirs if d not in _SKIP]
+            # 目录名 = 自有包（src/、pkg/ 或任意包目录布局）——
+            # 不硬编码目录名，任何布局的包都不会被当成第三方依赖
+            for d in dirs:
+                own.add(d)
             for f in files:
                 if f.endswith(".py"):
                     own.add(f[:-3])
@@ -384,86 +516,39 @@ class Coding(Phase):
         return sorted(packages)
 
     def _auto_install(self, directory: str):
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        from codegen.infrastructure.tools.registry import runtime
+        from codegen.infrastructure.tools.registry import docker_available
 
+        # 执行环境自包含：依赖安装只发生在容器内（docker_script 每次执行
+        # 前 pip install -r requirements）。宿主机一律不现场装（不污染
+        # 根环境）—— 缺失依赖让测试失败并诚实报告。这里只扫描 imports，
+        # 把包名写进 requirements.txt（容器安装 + 交付供应链清单）。
+        if not docker_available():
+            print("  [Coding] 宿主机模式：跳过依赖自动安装"
+                  "（容器内自动装 / 缺失由测试诚实报告）", flush=True)
+            return
         own_modules = tuple(
             m.get("name", "") for m in self.blackboard.get("modules", [])
         )
         packages = self._scan_imports(directory, own_modules=own_modules)
         if not packages:
             return
-        venv_dir = runtime().ctx.venv_dir
-        pip = (
-            os.path.join(venv_dir, "Scripts" if os.name == "nt" else "bin", "pip")
-            if venv_dir
-            else "pip"
-        )
-
-        def install_one(pkg: str) -> tuple[str, bool]:
-            """pip install 单个包 → (pkg, ok)。并行 4 路，失败不刷屏。"""
+        req_path = os.path.join(directory, "requirements.txt")
+        existing_lines: list[str] = []
+        if os.path.exists(req_path):
             try:
-                r = subprocess.run(
-                    [pip, "install", "--no-input", pkg],
-                    capture_output=True, timeout=90, check=False,
-                )
-            except (subprocess.TimeoutExpired, OSError):
-                return pkg, False
-            return pkg, r.returncode == 0
-
-        # 并行安装：串行 40 个假依赖每个等超时是"很慢"的主要来源之一
-        results = []
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = {pool.submit(install_one, p): p for p in packages}
-            for fut in as_completed(futures):
-                try:
-                    results.append(fut.result())
-                except Exception:  # noqa: BLE001 —— 单包失败不拖垮整批安装
-                    results.append((futures[fut], False))
-
-        installed: list[str] = []
-        failed: list[str] = []
-        for pkg, ok in results:
-            if not ok:
-                failed.append(pkg)
-                _log.warning("pip install failed for %s in %s", pkg, directory)
-                continue
-            version = ""
-            try:
-                show = subprocess.run(
-                    [pip, "show", pkg],
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    timeout=30,
-                )
-                for line in show.stdout.splitlines():
-                    if line.startswith("Version:"):
-                        version = line.split(":", 1)[1].strip()
-                        break
-            except (subprocess.TimeoutExpired, OSError):
-                pass
-            installed.append(f"{pkg}=={version}" if version else pkg)
-        if failed:
-            # 失败合并成一条警告，不再每个包刷一行
-            print(
-                f"  [Coding] ⚠️ {len(failed)} 个依赖安装失败: "
-                f"{', '.join(failed[:10])}{' …' if len(failed) > 10 else ''}"
-                "（网络/包名问题）— 交付项目可能缺依赖",
-                flush=True,
-            )
-        if installed:
-            req_path = os.path.join(directory, "requirements.txt")
-            existing = ""
-            if os.path.exists(req_path):
-                try:
-                    existing = open(req_path, encoding="utf-8").read().rstrip()
-                except OSError:
-                    existing = ""
+                existing_lines = open(req_path, encoding="utf-8").read().splitlines()
+            except OSError:
+                existing_lines = []
+        existing_names = {
+            line.split("==", 1)[0].strip().lower()
+            for line in existing_lines
+            if line.strip() and not line.startswith("#")
+        }
+        added = [p for p in packages if p.lower() not in existing_names]
+        if added:
             with open(req_path, "w", encoding="utf-8") as f:
-                f.write(
-                    existing + ("\n" if existing else "") + "\n".join(installed) + "\n"
-                )
+                f.write("\n".join(existing_lines + added) + "\n")
             _log.info(
-                "requirements.txt updated with %d pinned packages", len(installed)
+                "requirements.txt updated with %d packages (%d kept)",
+                len(added), len(existing_names),
             )

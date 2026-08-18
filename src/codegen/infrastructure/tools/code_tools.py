@@ -21,7 +21,9 @@ def _sandbox_env() -> dict:
 @register(
     name="run_code",
     description="Run the project's main entry point and get output or errors. "
-                "Returns stdout and stderr. Timeout after 30 seconds.",
+                "Returns stdout and stderr. Timeout after 30 seconds. "
+                "Identical runs are cached — do NOT re-run the same entry; "
+                "results change only after write_file.",
     parameters={
         "type": "object",
         "properties": {
@@ -34,13 +36,19 @@ def _sandbox_env() -> dict:
     }
 )
 def run_code(entry: str = "main.py") -> str:
-    # 防呆：测试文件必须用 run_tests（pytest）—— python test_x.py 不会
+    # 防呆 1：测试文件必须用 run_tests（pytest）—— python test_x.py 不会
     # 收集测试，直接跑必然空跑/报错，前端显示 ✗ 会误导成"项目坏了"
     base = os.path.basename(entry)
     if (base.startswith("test_") and base.endswith(".py")) \
             or base == "conftest.py":
         return (f"'{entry}' is a TEST file — do NOT run it with run_code. "
                 "Use the run_tests tool (pytest) instead.")
+    # 防呆 2：run_code 只接受项目文件路径 —— '-c'/'--help' 等以 '-' 开头
+    # 的参数会被 python 当选项而非脚本，直接失败；也不允许绝对路径/穿越
+    if entry.startswith("-") or entry.startswith("/") or "\\" in entry \
+            or ".." in entry or ":" in entry[:2]:
+        return (f"Error: run_code accepts a RELATIVE project file path "
+                f"only (e.g. 'main.py', 'src/cli.py'). Got '{entry}'.")
     project_dir = runtime().project_dir
     python = runtime().venv_python()
     try:
@@ -165,7 +173,9 @@ def _scan_dangerous_code(directory: str) -> list[str]:
 @register(
     name="run_tests",
     description="Run the project's pytest suite (test_*.py) and return results. "
-                "Timeout after 120 seconds.",
+                "Timeout after 120 seconds. Identical runs are cached — do "
+                "NOT re-run the same tests unless a file was just written; "
+                "results change only after write_file.",
     parameters={
         "type": "object",
         "properties": {
@@ -188,8 +198,13 @@ def run_tests(entry: str = "") -> str:
     project_dir = runtime().project_dir
     python = runtime().venv_python()
     if entry:
-        # 防呆：tester 常传 "test_scanner"（漏 .py）→ pytest 报 file not
-        # found；自动补全再校验存在
+        # 防呆 1：entry 只接受单个文件名 —— tester 常传 "test_scanner -v"
+        # 等带参数形式，pytest 会报 file not found
+        if " " in entry or "\t" in entry:
+            return (f"Error: 'entry' must be a single test file name — "
+                    f"do NOT pass pytest flags ('{entry[:40]}'). Just the "
+                    "filename, e.g. 'test_scanner.py'.")
+        # 防呆 2：漏 .py 后缀自动补全，再校验存在
         if not entry.endswith(".py"):
             entry = entry + ".py"
         if not os.path.exists(os.path.join(project_dir, entry)):

@@ -134,6 +134,12 @@ def run_pipeline(run_id: str, task: str, start_from: str = "",
         except Exception:
             pass
         fail_run(run_id, detail)
+        # 失败也要落盘 run_events.json —— 之前崩溃的 run 事件全丢，
+        # token 分布/阶段耗时无法事后分析
+        try:
+            persist_run(run_id, task)
+        except Exception:
+            pass
         emit(run_id, {"event": "error", "timestamp": time.time(),
                       "message": detail})
         raise

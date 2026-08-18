@@ -6,7 +6,14 @@ from codegen.domain.phase import Phase
 from codegen.domain.registry import register_phase
 from serving.application.ws_manager import ask_choice, has_ws
 
-MAX_QUESTIONS = int(load_pipeline_config().get("pm", {}).get("max_questions", 7))
+# 默认提问数上限（模块导入时的默认值；实际值每次惰性读取，
+# 改配置即时生效，不用重启）
+MAX_QUESTIONS = 7
+
+def _max_questions() -> int:
+    """惰性读取 pm.max_questions —— 之前模块级导入时读一次，改配置
+    要重启才生效。"""
+    return int(load_pipeline_config().get("pm", {}).get("max_questions", MAX_QUESTIONS))
 
 def _pm_extract(pm_output) -> tuple:
     """Leniently extract (question, summary, message) from PM output.
@@ -46,7 +53,8 @@ class RequirementsDiscussion(Phase):
     def _collect_requirements(self, pm, run_id: str) -> dict:
         """初始生成 + 提问循环/headless 直出，返回最终 PM 输出。"""
         pm_output = pm.react(
-            self.prompt("product_manager", max_questions=MAX_QUESTIONS), json_mode=True
+            self.prompt("product_manager", max_questions=_max_questions()),
+            json_mode=True,
         )
         if not has_ws(run_id):
             pm_output = self._headless_summary(pm)
@@ -65,8 +73,9 @@ class RequirementsDiscussion(Phase):
         不浪费 PM 提问轮次。审阅修复：提示语强调完整需求 ——
         无澄清环节，summary 质量全押这一次生成。"""
         print("  [PM] 无前端连接 — 跳过提问，直接生成 summary", flush=True)
+        from core.config import load_sys_message
         return pm.react(
-            "No interactive Q&A is available in this environment. Generate your MOST COMPLETE requirements summary directly from the user's idea — infer sensible defaults for unknown fields (platform, language, features) instead of leaving them null.",
+            load_sys_message("pm_headless_summary"),
             json_mode=True,
         )
 
@@ -81,14 +90,15 @@ class RequirementsDiscussion(Phase):
                 print(f"  [PM] malformed output: {str(pm_output)[:120]}", flush=True)
                 if asked == 0:
                     asked += 1
+                    from core.config import load_sys_message
                     pm_output = pm.react(
-                        "Output valid JSON with either a 'question' object or a 'summary' object.",
+                        load_sys_message("pm_malformed_retry"),
                         json_mode=True,
                     )
                     continue
                 return pm_output
             asked += 1
-            if asked > MAX_QUESTIONS:
+            if asked > _max_questions():
                 print(
                     f"  [PM] exceeded {MAX_QUESTIONS} questions — forcing summary",
                     flush=True,
@@ -125,6 +135,13 @@ class RequirementsDiscussion(Phase):
         req.setdefault("language", "Python")
         if not isinstance(req.get("core_features"), list):
             req["core_features"] = []
+        # 需求膨胀护栏：用户任务通常 2-6 项功能 —— PM 超量扩展会让
+        # 质检拿"需求外功能"当标准回跳修复（白烧 token）。超 6 项裁剪
+        # 并告警（保留前 6 项，最贴近用户原话的顺序）。
+        if len(req["core_features"]) > 6:
+            print(f"  [PM] 需求膨胀：{len(req['core_features'])} 项 "
+                  f"core_features 超上限 — 裁剪为前 6 项", flush=True)
+            req["core_features"] = req["core_features"][:6]
         self.blackboard["requirements"] = req
         HookRegistry.trigger("requirements_submitted", data=req)
         self.blackboard["task_description"] = self._describe(req)

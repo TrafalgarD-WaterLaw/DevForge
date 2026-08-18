@@ -86,7 +86,12 @@ class Design(Phase):
             key = f.strip().lower()
             if not key:
                 continue
-            if len(key) <= 2 or any(("一" <= ch <= "鿿" for ch in key)):
+            # 中文 feature 不参与覆盖检查：设计/模块名是英文，中文串在
+            # blob 里必然不命中 → 之前会让 CTO 收到虚假 missing 白重试
+            # 2 次（且永远修不好）。中英同义映射不现实，跳过。
+            if any(("一" <= ch <= "鿿" for ch in key)):
+                continue
+            if len(key) <= 2:
                 hit = key in blob
             else:
                 hit = bool(re.search(f"\\b{re.escape(key)}\\b", blob))

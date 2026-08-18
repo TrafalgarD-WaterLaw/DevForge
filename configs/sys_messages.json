@@ -1,0 +1,15 @@
+{
+  "coder_retry_missing_module": "Your previous attempt did NOT write the required files to disk ({files}). Write the COMPLETE module now using write_file — no placeholders, no partial output.",
+  "tester_failure_feedback": "Your tests FAILED with the following output:\n{output}\n\nAnalyze each failure:\n- If the TEST is wrong (wrong expected value, wrong import, fixture misuse): fix the TEST file.\n- If the test reveals a REAL BUG in the source code: DO NOT weaken or delete the test — leave it failing and write a clear report of the broken module/function in your final message (the fixer will repair the source later).\nRe-run with run_tests. You have ONE chance to fix the tests; remaining failures go to the fixer.",
+  "pm_headless_summary": "No interactive Q&A is available in this environment. Generate your MOST COMPLETE requirements summary directly from the user's idea — infer sensible defaults for unknown fields (platform, language, features) instead of leaving them null.",
+  "pm_malformed_retry": "Output valid JSON with either a 'question' object or a 'summary' object.",
+  "validate_retry": "Your previous output failed validation: {errors}. Re-output as JSON matching the schema exactly.",
+  "validate_retry_again": "Your previous output failed validation: {errors}. Fix these and output again.",
+  "agent_malformed_tool_args": "Your tool call arguments for {names} were truncated or invalid JSON and could not be executed. Re-output the tool call with complete, valid JSON arguments.",
+  "agent_truncation_retry": "Your previous response hit the output limit and was cut off. Output the COMPLETE JSON again, being concise.",
+  "agent_continue": "Continue.",
+  "agent_tool_rounds_exhausted": "You have used all your tool-call rounds. Output your final answer now — do not call tools again.",
+  "agent_context_compacted": "[上下文已压缩：丢弃 {dropped} 条早期消息。继续基于最近的内容工作，不要假设被省略的部分。]",
+  "iteration_engineer_regression": "Your changes broke the regression tests — the project's existing test suite now fails:\n{output}\n\nFix the SOURCE CODE so the failing tests pass again. Do NOT modify test files and do NOT weaken assertions — the tests define the expected behaviour. Re-run run_tests to confirm. You have ONE chance; remaining failures will be reported to the user.",
+  "tester_no_tests_retry": "You have NOT written any test_*.py files yet — the project has no tests on disk. Do it now: for EACH module, write `test_<module>.py` in the project root covering its exported functions (the contracts and source are in your conversation above). Then run_tests to verify. Do NOT stop until every module has a test file."
+}

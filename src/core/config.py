@@ -110,3 +110,22 @@ def load_roles_config() -> dict:
     if _roles_cache is None:
         _roles_cache = _load_json("roles")
     return _roles_cache
+
+# ── System messages（提示词不硬编码在代码里）───────────
+
+_sys_messages_cache: dict | None = None
+
+def load_sys_message(key: str, **fmt) -> str:
+    """Load a system message from configs/sys_messages.json (cached).
+
+    ``{placeholder}`` in the message is filled from *fmt* (str.format).
+    提示词统一放配置文件，代码只引用 key —— 改措辞不用动代码。
+    """
+    global _sys_messages_cache
+    if _sys_messages_cache is None:
+        try:
+            _sys_messages_cache = _load_json("sys_messages")
+        except FileNotFoundError:
+            _sys_messages_cache = {}
+    msg = _sys_messages_cache.get(key, "")
+    return msg.format(**fmt) if fmt else msg

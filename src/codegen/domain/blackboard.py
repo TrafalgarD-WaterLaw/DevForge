@@ -162,6 +162,21 @@ class Blackboard:
                 if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
         data["codes"] = dict(self.codes)
         data["docs"] = dict(self.docs)
+        # contracts/module_graph 序列化：start_from=Verification 重跑或
+        # 迭代时 reviewer 需要模块契约 —— 之前丢失后 reviewer 只能
+        # 拿到 "(no contracts defined)" 凭代码硬审
+        data["contracts"] = {
+            name: {
+                "module": c.module,
+                "version": c.version,
+                "exports": c.exports,
+                "dependencies": c.dependencies,
+                "updated_at": c.updated_at,
+                "updated_by": c.updated_by,
+            }
+            for name, c in self.contracts.items()
+        }
+        data["module_graph"] = dict(self.module_graph)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2, default=str)
 
@@ -172,8 +187,23 @@ class Blackboard:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
         for k, v in data.items():
-            if k in ("codes", "docs"):
+            if k in ("codes", "docs", "contracts", "module_graph"):
                 continue
             self._data[k] = v
         self.codes = data.get("codes", {})
         self.docs = data.get("docs", {})
+        # 契约与依赖图从 dict 形式还原
+        raw_contracts = data.get("contracts", {}) or {}
+        if raw_contracts:
+            self.contracts = {
+                name: Contract(
+                    module=c["module"],
+                    version=int(c.get("version", 1) or 1),
+                    exports=c.get("exports", []),
+                    dependencies=c.get("dependencies", []),
+                    updated_at=float(c.get("updated_at", 0) or 0),
+                    updated_by=c.get("updated_by", ""),
+                )
+                for name, c in raw_contracts.items()
+            }
+        self.module_graph = data.get("module_graph", {}) or {}

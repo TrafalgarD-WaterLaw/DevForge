@@ -92,6 +92,22 @@ def _find_docker() -> str | None:
             return cand
     return None
 
+def docker_available() -> bool:
+    """True = 沙箱配置为 docker 且 docker 可用（探测结果缓存）。
+
+    chat_chain 据此决定是否预创建项目 venv —— docker 模式下测试/执行
+    都走容器，宿主机 venv 无用（省 35MB 磁盘 + 建 venv 时间）；
+    宿主机回退模式由 venv_python() 惰性创建兜底。
+    """
+    try:
+        from core.config import load_pipeline_config
+        mode = load_pipeline_config().get("tools", {}).get("sandbox", "")
+    except Exception:
+        return False
+    if mode != "docker":
+        return False
+    return bool(sandbox_prefix("."))
+
 def sandbox_prefix(project_dir: str) -> list[str]:
     """沙箱执行前缀：config ``tools.sandbox`` = "docker" 时生成代码跑在容器里
     （镜像 python:3.12-slim，项目目录挂载为 /work）；默认空 = 宿主机直跑。
@@ -176,13 +192,17 @@ def docker_pytest_script(test_files: list[str]) -> str:
     测试给出真实 import 错误让 agent 判断）。
 
     `-p no:cacheprovider`：/work 挂载下 .pytest_cache 写入告警，关掉。
+    `--cov=./--cov-report` 与宿主机路径（cov_args）一致 —— 否则
+    quality_gate_min_coverage 的覆盖率证据在 docker 模式下永远拿不到
+    （_parse_coverage 无输出可解析，降级门禁静默失效）。
     unset 代理由 docker_script 统一处理（环境免疫）。
     """
     import shlex
     files = " ".join(shlex.quote(f) for f in test_files)
     return ("python -m pip install -q --default-timeout 30 "
             "pytest pytest-cov 2>/dev/null || true; "
-            f"python -m pytest -q --no-header -p no:cacheprovider {files}")
+            "python -m pytest -q --no-header -p no:cacheprovider "
+            "--cov=. --cov-report=term-missing:skip-covered " + files)
 
 def cov_args(python: str, project_dir: str = "") -> list[str]:
     """pytest 覆盖率参数：仅当 *python* 是项目 venv（ensure_pytest 保证装有
@@ -201,9 +221,12 @@ def cov_args(python: str, project_dir: str = "") -> list[str]:
     if venv_dir and python.startswith(venv_dir):
         return ["--cov=.", "--cov-report=term-missing:skip-covered"]
     return []
-# 结果缓存：只缓存只读/幂等工具；write_file 写后清空整个缓存（文件可能已变）
-CACHEABLE_TOOLS = frozenset({"read_file", "read_many", "search_web"})
-SEARCH_CACHE_TTL = 600        # search_web 结果 10 分钟有效（网络信息时效性）
+# 结果缓存：只读/幂等工具 + 测试/执行（项目文件未变则结果必然相同）。
+# write_file 写后清空整个缓存 —— 修复后复测拿到新结果，不会误读旧缓存。
+# run_tests/run_code 缓存直接消灭"同一 entry 反复跑"的重复执行
+# （docker 每次 20-40s + 结果重复进历史 ≈ tester 23 次调用的冗余大头）
+CACHEABLE_TOOLS = frozenset(
+    {"read_file", "read_many", "run_tests", "run_code"})
 
 def _args_key(arguments: dict) -> str:
     """Deterministic key for tool arguments (dict → canonical string)."""
@@ -224,6 +247,11 @@ class ToolRuntime:
     ctx: ToolContext = field(default_factory=ToolContext)
     # (tool_name, args_key) → (cached_at, result) — per-run 缓存，写后失效
     _cache: dict[tuple[str, str], tuple[float, str]] = field(default_factory=dict)
+    # agent → 已读文件集（规范化绝对路径）。跨工具去重：read_many 批量读
+    # 后再 read_file 单文件是模型高频重复（缓存 key 不同拦不住），
+    # 这里记住"本轮读过什么"，重复读返回提示而不是重发内容。
+    # 必须 per-agent：不同 agent 的对话历史互不可见，A 读过的 B 读是正常的。
+    _read_files: dict[str, set[str]] = field(default_factory=dict)
     # 正在执行工具的 agent 名（todo_write 事件归属用）。
     # ContextVar：并行 coder 共享同一 runtime，普通字段会被别的线程
     # 在"赋值→执行"之间改写，todo 事件归属错乱→ 线程隔离
@@ -240,6 +268,25 @@ class ToolRuntime:
     def current_agent(self, value: str):
         self._agent_var.set(value)
 
+    # ── 已读文件跟踪（跨工具去重）──────────────────────
+
+    def mark_read(self, path: str):
+        """记录当前 agent 已读 *path*（规范化绝对路径）。"""
+        agent = self.current_agent
+        if agent:
+            self._read_files.setdefault(agent, set()).add(path)
+
+    def is_read(self, path: str) -> bool:
+        """当前 agent 是否已在本轮对话中读过 *path*。"""
+        agent = self.current_agent
+        return bool(agent) and path in self._read_files.get(agent, ())
+
+    def invalidate_file(self, path: str):
+        """文件被写（内容变化）→ 所有 agent 对该文件的已读记录失效，
+        允许重新读取新内容。"""
+        for s in self._read_files.values():
+            s.discard(path)
+
     def execute(self, name: str, arguments: dict) -> str:
         """Execute a tool by name, return its result as a string."""
         tool = _registry.tools.get(name)
@@ -250,12 +297,9 @@ class ToolRuntime:
             self._cache.clear()
         key = (name, _args_key(arguments))
         if name in CACHEABLE_TOOLS:
-            import time as _time
             hit = self._cache.get(key)
             if hit is not None:
-                cached_at, cached = hit
-                if name != "search_web" or _time.time() - cached_at < SEARCH_CACHE_TTL:
-                    return cached
+                return hit[1]
         try:
             result = str(tool.function(**arguments))
         except Exception as e:

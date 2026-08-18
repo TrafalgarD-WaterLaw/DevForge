@@ -4,11 +4,10 @@ import difflib
 import json
 import logging
 import os
-import signal
-import subprocess
 from core.config import load_phases_config
 from core.events import Events, HookRegistry
 from codegen.application.patterns import parallel
+from codegen.application.process import run_process, trim_paths
 from codegen.domain.phase import Phase
 from codegen.domain.registry import register_phase
 from codegen.domain.validate import validate_output, validated_react
@@ -50,11 +49,11 @@ def run_project_tests(
         cmd = docker_script(directory, docker_pytest_script(test_files))
         if cmd:
             out, err, code = run_process(cmd, cwd, timeout=120)
-            output = (err + out).decode("utf-8", errors="replace")
+            output = trim_paths((err + out).decode("utf-8", errors="replace"),
+                                directory)
             if code == 0:
                 return (False, "All tests passed.", False)
-            return (True, output.replace(directory.replace("\\", "/") + "/", ""),
-                    False)
+            return (True, output, False)
         # 宿主机直跑：venv 必须装好 pytest
         if ensure_pytest(python):
             cmd = [
@@ -67,11 +66,11 @@ def run_project_tests(
                 *test_files,
             ]
             out, err, code = run_process(cmd, cwd, timeout=120)
-            output = (err + out).decode("utf-8", errors="replace")
+            output = trim_paths((err + out).decode("utf-8", errors="replace"),
+                                directory)
             if code == 0:
                 return (False, "All tests passed.", False)
-            return (True,
-                    output.replace(directory.replace("\\", "/") + "/", ""), False)
+            return (True, output, False)
         _log.warning("pytest unavailable in venv — falling back to entry")
     entry = entry_point or "main.py"
     if not os.path.exists(os.path.join(directory, entry)) and os.path.exists(
@@ -79,14 +78,13 @@ def run_project_tests(
     ):
         entry = "cli.py"
     out, err, code = run_process([python, entry], cwd, timeout=30)
-    output = (err + out).decode("utf-8", errors="replace")
+    output = trim_paths((err + out).decode("utf-8", errors="replace"), directory)
     # 有测试文件但 pytest 装不上 → fallback 入口运行，结果不可信标记 infra
     infra_failed = bool(test_files)
     if code == 0:
         return (False, "The software ran successfully without errors.", infra_failed)
     if output and "Traceback" in output:
-        return (True, output.replace(directory.replace("\\", "/") + "/", ""),
-                infra_failed)
+        return (True, output, infra_failed)
     return (bool(output), output or "Process exited with non-zero code.",
             infra_failed)
 
@@ -113,6 +111,7 @@ class Verification(Phase):
             self._run_fix_round(
                 directory, review_texts, discarded,
                 has_bugs and not infra_failed, test_output,
+                loop=loop,
             )
 
     def _run_review_round(self, lenses: list, loop: int) -> tuple[list[str], int, int]:
@@ -125,22 +124,30 @@ class Verification(Phase):
             self.blackboard.get("requirements", {}), ensure_ascii=False
         )
         contracts = self._contracts_text()
-        for agent, agent_output in parallel(
-            [
+        # 第二轮（fixer 修完后）是确认性重审：只读改动确认修复正确，
+        # 不需要第一轮的全量深度分析 —— 限 3 轮（read_many + 输出），
+        # 4 个 reviewer 两轮全量审查是 token 大头（6ff5ccee: 36 万）
+        tasks = []
+        for l in lenses:
+            agent = self.agent("reviewer", tag=f"{l['name']}Reviewer")
+            if loop > 1:
+                agent._max_tool_rounds = min(agent._max_tool_rounds, 3)
+            tasks.append(
                 (
-                    self.agent("reviewer", tag=f"{l['name']}Reviewer"),
+                    agent,
                     f"Focus: {l['focus']}\n\n{self.prompt('reviewer', codes=self.files, requirements=requirements, contracts=contracts)}",
                     True,
                 )
-                for l in lenses
-            ]
-        ):
+            )
+        for agent, agent_output in parallel(tasks):
             if agent_output is not None and isinstance(agent_output, dict):
                 errors = validate_output(agent_output, self.schema("reviewer"))
                 if errors:
+                    from core.config import load_sys_message
                     agent_output = validated_react(
                         agent,
-                        f"Your previous output failed validation: {'; '.join(errors)}. Re-output as JSON matching the schema exactly.",
+                        load_sys_message("validate_retry",
+                                         errors="; ".join(errors)),
                         self.schema("reviewer"),
                     )
                     if validate_output(agent_output, self.schema("reviewer")):
@@ -195,11 +202,17 @@ class Verification(Phase):
         discarded: int,
         has_bugs: bool,
         test_output: str,
+        *,
+        loop: int = 1,
     ) -> None:
         """fixer 修复 → 重扫 → 修复后复测 → 里程碑 → 人工审阅。"""
         all_reviews = "\n\n---\n\n".join(review_texts)
         qg_feedback = self._quality_gate_feedback()
         fixer = self.agent("fixer")
+        # 第二轮修复范围小（reviewer 只报了遗漏项），8 轮全量修复
+        # 是浪费 —— 限 6 轮
+        if loop > 1:
+            fixer._max_tool_rounds = min(fixer._max_tool_rounds, 6)
         fixer_note = (
             f"\nNOTE: {discarded} of the review outputs were invalid and discarded — double-check the code yourself for bugs."
             if discarded
@@ -209,6 +222,8 @@ class Verification(Phase):
         # tester 在编码阶段的源码 bug 分析（哪个模块/函数坏了）——
         # 拼进 test_output，fixer 不用从 pytest 原始输出里猜
         tester_report = self.blackboard.get("tester_report", "")
+        # 上一轮 fixer 未改动任何文件 → 明确警告（防"幻觉修复"循环）
+        no_change = self.blackboard.get("fixer_no_change", "")
         fixer.react(
             self.prompt(
                 "fixer",
@@ -217,6 +232,7 @@ class Verification(Phase):
                 test_output=test_output
                 + qg_feedback
                 + (f"\nTESTER REPORT:\n{tester_report}" if tester_report else "")
+                + (f"\n{no_change}" if no_change else "")
                 + (
                     f"\nUSER REJECTED your previous fix: {rejected}" if rejected else ""
                 ),
@@ -231,11 +247,18 @@ class Verification(Phase):
             f for f, c in self.blackboard.codes.items() if self._pre_codes.get(f) != c
         ]
         if review_texts or has_bugs or discarded:
-            msg = (
-                f"修复完成: {len(changed)} 个文件，等待你审阅"
-                if changed
-                else "修复完成，但未改动任何文件（结果存疑）"
-            )
+            if changed:
+                msg = f"修复完成: {len(changed)} 个文件，等待你审阅"
+                self.blackboard["fixer_no_change"] = ""
+            else:
+                msg = "修复完成，但未改动任何文件（结果存疑）"
+                # 传给下一轮 fixer：必须实际修改文件
+                self.blackboard["fixer_no_change"] = (
+                    "WARNING: your previous fix changed NO files, yet review "
+                    "issues remain. Every reported issue must end in a "
+                    "write_file call that actually changes the file — or "
+                    "explicitly say why no change is needed. Do not claim "
+                    "fixes you did not make.")
             if fixed_bugs:
                 msg += "（测试仍未通过）"
         else:
@@ -328,51 +351,7 @@ class Verification(Phase):
             entry_point=self.blackboard.get("entry_point", ""),
         )
 
-    def _run_process(self, cmd, cwd, timeout: int):
-        """Run *cmd*, kill on timeout, return (stdout, stderr, returncode)."""
-        try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=cwd,
-                stdin=subprocess.DEVNULL,
-                start_new_session=os.name != "nt",
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
-                if os.name == "nt"
-                else 0,
-            )
-            try:
-                return (*process.communicate(timeout=timeout), process.returncode)
-            except subprocess.TimeoutExpired:
-                self._kill_process(process)
-                try:
-                    return (*process.communicate(timeout=5), process.returncode)
-                except subprocess.TimeoutExpired:
-                    try:
-                        process.kill()
-                    except OSError:
-                        pass
-                    return (*process.communicate(), process.returncode)
-        except OSError as ex:
-            return (b"", str(ex).encode(), 1)
-
     @staticmethod
-    def _kill_process(process):
-        """Best-effort termination — never raises ."""
-        try:
-            if os.name == "nt":
-                try:
-                    process.send_signal(signal.CTRL_BREAK_EVENT)
-                except OSError:
-                    process.kill()
-            elif hasattr(os, "killpg"):
-                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-            else:
-                os.kill(process.pid, signal.SIGTERM)
-        except OSError:
-            pass
-
-    @staticmethod
-    def _trim_paths(output: str, directory: str) -> str:
-        return output.replace(directory.replace("\\", "/") + "/", "")
+    def _run_process(cmd, cwd, timeout: int):
+        """Run *cmd* — 公共实现（codegen.application.process.run_process）。"""
+        return run_process(cmd, cwd, timeout)

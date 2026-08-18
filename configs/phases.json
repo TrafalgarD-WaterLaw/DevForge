@@ -37,11 +37,12 @@
    "coder": {
     "tools": [
      "read_file",
+     "read_many",
      "write_file",
-     "run_code",
      "todo_write",
      "list_files"
     ],
+    "max_tool_rounds": 10,
     "prompt": "prompts/coder.txt"
    },
    "integrator": {
@@ -53,6 +54,7 @@
      "list_files",
      "delete_file"
     ],
+    "max_tool_rounds": 10,
     "prompt": "prompts/integrator.txt"
    },
    "tester": {
@@ -97,11 +99,9 @@
     "tools": [
      "read_file",
      "read_many",
-     "list_files",
-     "run_code",
-     "search_web"
+     "list_files"
     ],
-    "max_tool_rounds": 8,
+    "max_tool_rounds": 5,
     "prompt": "prompts/reviewer.txt",
     "schema": "schemas/reviewer.json"
    },
@@ -115,6 +115,7 @@
      "todo_write",
      "delete_file"
     ],
+    "max_tool_rounds": 8,
     "prompt": "prompts/fixer.txt"
    }
   }

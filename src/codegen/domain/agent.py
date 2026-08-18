@@ -10,6 +10,9 @@ from codegen.infrastructure.llm_client import LLMClient
 
 _logger = _logging.getLogger(__name__)
 MAX_TOOL_ROUNDS = 16
+# 压缩时旧工具结果截断保留的开头字符数（read_many/run_tests 的结果
+# 是历史膨胀主因，旧结果只需留开头让模型知道"读过什么"）
+_COMPACT_TOOL_TAIL = 800
 
 class Agent:
     """Owns dialogue history and the ReAct loop.  Uses DeepSeek's
@@ -62,17 +65,37 @@ class Agent:
         self, user_msg: str, *, json_mode: bool = False, stream: bool = False
     ) -> dict:
         """Run one ReAct loop.  Emits ``agent_done`` on every exit path —
-        the frontend stage panel marks the agent's window done (green) on it."""
+        the frontend stage panel marks the agent's window done (green) on it.
+
+        ``status`` 区分正常收尾与提前终止：done（正常输出）/ terminated
+        （工具轮次耗尽、空响应等强制收尾）/ error（LLM 异常）——
+        前端据此不把"提前终止"误标成绿色完成。
+        """
+        result = None
+        failed = False
         try:
-            return self._react_inner(user_msg, json_mode=json_mode, stream=stream)
+            result = self._react_inner(
+                user_msg, json_mode=json_mode, stream=stream)
         except Exception:
+            failed = True
             # 调试：react 内任意异常打印完整堆栈（定位崩溃点）
             _logger.exception("[%s] react failed", self.name)
             raise
         finally:
             from core.events import HookRegistry
 
-            HookRegistry.trigger("agent_done", agent=self.name)
+            HookRegistry.trigger(
+                "agent_done", agent=self.name,
+                status="error" if failed else self._agent_status(result))
+        return result
+
+    @staticmethod
+    def _agent_status(result) -> str:
+        """agent 收尾状态：done = 正常输出；terminated = 强制收尾。"""
+        if not isinstance(result, dict) or not result.get("_terminated"):
+            return "done"
+        return "error" if result.get("_terminated") == "llm_error" \
+            else "terminated"
 
     def _react_inner(
         self, user_msg: str, *, json_mode: bool = False, stream: bool = False
@@ -98,6 +121,38 @@ class Agent:
             if result["tool_calls"]:
                 malformed = self._record_tool_calls(result["tool_calls"])
                 if malformed:
+                    # 序列必须严格成对：assistant(tool_calls) → 每个 id 的
+                    # tool 消息 → user 反馈。正常调用先执行出结果，损坏
+                    # 调用补 ToolError 消息，最后再反馈重出 —— 任何一步
+                    # 乱序或缺失都会让 API 报 400（803a790b integrator
+                    # 实况："insufficient tool messages following tool_calls"）
+                    good = [tc for tc in result["tool_calls"]
+                            if tc.get("args") is not None]
+                    if good:
+                        self._run_tools(good)
+                    for tc in result["tool_calls"]:
+                        if tc.get("args") is None:
+                            self._messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tc["id"],
+                                    "content": (f"ToolError: arguments for "
+                                                f"'{tc['name']}' were truncated "
+                                                "or invalid JSON and could "
+                                                "not be executed."),
+                                }
+                            )
+                    from core.config import load_sys_message
+                    names = ", ".join(
+                        (tc["name"] for tc in result["tool_calls"]
+                         if tc.get("args") is None))
+                    self._messages.append(
+                        {
+                            "role": "user",
+                            "content": load_sys_message(
+                                "agent_malformed_tool_args", names=names),
+                        }
+                    )
                     continue
                 self._run_tools(result["tool_calls"])
                 continue
@@ -139,8 +194,13 @@ class Agent:
         return result
 
     def _record_tool_calls(self, tool_calls: list) -> bool:
-        """工具调用回填历史（参数损坏用 "{}" 占位保证 API 往返合法）。
-        返回 True 表示存在损坏参数（调用方应反馈后重出）。"""
+        """回填 assistant(tool_calls) 消息（参数损坏用 "{}" 占位保证
+        消息结构合法）；返回 True 表示存在损坏参数 —— 调用方负责补齐
+        tool 响应并按序反馈（_react_inner 的 malformed 分支）。
+
+        NOTE: 这里不再追加 tool/user 消息 —— 顺序必须严格是
+        assistant(tool_calls) → 全部 tool 响应 → user 反馈，跨函数追加
+        会把 user 插到 tool 响应中间，API 直接 400。"""
         malformed = [tc for tc in tool_calls if tc.get("args") is None]
         self._messages.append(
             {
@@ -161,19 +221,12 @@ class Agent:
                 ],
             }
         )
-        if not malformed:
-            return False
-        names = ", ".join((tc["name"] for tc in malformed))
-        _logger.warning(
-            "[%s] malformed tool args: %s — re-requesting", self.name, names
-        )
-        self._messages.append(
-            {
-                "role": "user",
-                "content": f"Your tool call arguments for {names} were truncated or invalid JSON and could not be executed. Re-output the tool call with complete, valid JSON arguments.",
-            }
-        )
-        return True
+        if malformed:
+            _logger.warning(
+                "[%s] malformed tool args: %s — re-requesting", self.name,
+                ", ".join((tc["name"] for tc in malformed)),
+            )
+        return bool(malformed)
 
     def _handle_truncation(self, text: str, json_mode: bool) -> dict:
         """finish_reason=length：JSON 模式整份重出；文本模式 Continue 续写。"""
@@ -181,10 +234,11 @@ class Agent:
             _logger.warning(
                 "[%s] JSON truncated — re-requesting concise output", self.name
             )
+            from core.config import load_sys_message
             self._messages.append(
                 {
                     "role": "user",
-                    "content": "Your previous response hit the output limit and was cut off. Output the COMPLETE JSON again, being concise.",
+                    "content": load_sys_message("agent_truncation_retry"),
                 }
             )
             try:
@@ -193,16 +247,20 @@ class Agent:
                 )
             except Exception:
                 return {"_terminated": "llm_error", "message": ""}
+            self._record_usage(retry.get("usage"))
             cont = retry.get("content") or ""
             if cont:
                 self._messages.append({"role": "assistant", "content": cont})
                 return self._parse(cont)
             return {"_terminated": "empty_response", "message": ""}
         _logger.warning("[%s] Response truncated — attempting continue", self.name)
+        from core.config import load_sys_message
         self._messages.append({"role": "assistant", "content": text})
-        self._messages.append({"role": "user", "content": "Continue."})
+        self._messages.append({"role": "user",
+                               "content": load_sys_message("agent_continue")})
         try:
             retry = self._llm.call(self._messages)
+            self._record_usage(retry.get("usage"))
             continuation = retry["content"]
             if continuation:
                 combined = text.rstrip() + continuation
@@ -219,10 +277,11 @@ class Agent:
         返回 _terminated → schema 必失败 → "N 份审查输出无效"的系统性根因。
         json_mode 此时才真正生效（json_object 强制合法 JSON）。
         """
+        from core.config import load_sys_message
         self._messages.append(
             {
                 "role": "user",
-                "content": "You have used all your tool-call rounds. Output your final answer now — do not call tools again.",
+                "content": load_sys_message("agent_tool_rounds_exhausted"),
             }
         )
         try:
@@ -234,6 +293,8 @@ class Agent:
             )
         except Exception:
             return {"_terminated": "llm_error", "message": ""}
+        # 收尾调用同样计入 usage —— 之前漏记导致前端 token 统计偏低
+        self._record_usage(result.get("usage"))
         text = result.get("content") or ""
         if text:
             self._messages.append({"role": "assistant", "content": text})
@@ -275,44 +336,79 @@ class Agent:
     def _compact_if_needed(self):
         """Sliding-window compaction before each LLM call.
 
-        历史超预算（默认 60k 字符 ≈ 60k token）时丢弃最旧的普通
-        user/assistant 消息 —— 零 LLM 成本（不做摘要调用）。规则：
-        - system 与当前问题（最后一条 user）永不丢
-        - tool_calls 消息与其 tool 结果必须成对 —— 全部保留（工具结果
-          已截断 6000 字符/条，不是主要膨胀源）
-        压缩是损失性的：丢弃的早期对话以一条说明消息代替，让模型知道
-        上下文被裁剪过。
+        历史超预算（默认 28k 字符，configs llm.max_context_chars）时压缩
+        —— 零 LLM 成本（不做摘要调用）。规则：
+        - system、首条 user（初始任务/契约）、末条 user（当前问题）永不丢
+        - 预算内（= 最近的）工具结果完整保留；更旧的工具结果截断到
+          800 字符 —— 工具结果是历史膨胀的主因（read_many 12k +
+          run_tests 3k 全量留着，旧结果只需留开头让模型知道"读过什么"）
+        - 普通 user/assistant 文本在预算不足时丢弃
+        压缩是损失性的：以一条说明消息代替被裁剪的内容，让模型知道
+        上下文被压缩过。
         """
         total = sum((len(m.get("content") or "") for m in self._messages))
         if total <= self._max_context_chars:
             return
+        # 首条 user = 初始任务/模块契约（tester 的契约、fixer 的审查意见）；
+        # 末条 user = 当前问题（工具循环中它不一定在最后，需按索引保护）
+        user_idx = [
+            i for i, m in enumerate(self._messages)
+            if m.get("role") == "user" and m.get("content")
+        ]
+        first_user = user_idx[0] if user_idx else None
+        last_user = user_idx[-1] if user_idx else None
         kept: list[dict] = []
         dropped = 0
+        truncated = 0
         budget = self._max_context_chars
-        for m in reversed(self._messages):
+        for i, m in enumerate(reversed(self._messages)):
+            orig_i = len(self._messages) - 1 - i
             role = m.get("role")
-            is_plain = role in ("user", "assistant") and bool(m.get("content"))
-            cost = len(m.get("content") or "") if is_plain else 0
-            if is_plain and budget - cost < 0 and kept:
+            content = m.get("content") or ""
+            if role == "system" or orig_i in (first_user, last_user):
+                kept.append(m)          # system / 初始任务 / 当前问题 —— 永不丢
+                budget -= len(content)
+                continue
+            if role == "tool":
+                if budget - len(content) >= 0:
+                    kept.append(m)      # 预算内（最近）的工具结果完整保留
+                    budget -= len(content)
+                else:
+                    # 旧工具结果截断：保留 tool_call_id 配对结构，
+                    # 内容留开头（模型靠它知道"读过什么"）
+                    kept.append({
+                        **m,
+                        "content": content[:_COMPACT_TOOL_TAIL]
+                        + f"\n…(结果过长，已压缩 {len(content)} → "
+                          f"{_COMPACT_TOOL_TAIL} 字符)",
+                    })
+                    truncated += 1
+                    budget -= _COMPACT_TOOL_TAIL
+                continue
+            if role == "assistant" and m.get("tool_calls"):
+                kept.append(m)          # tool_calls 消息小，成对保留
+                continue
+            cost = len(content)
+            if budget - cost < 0 and kept:
                 dropped += 1
                 continue
             kept.append(m)
             budget -= cost
-        if dropped == 0:
+        if dropped == 0 and truncated == 0:
             return
         kept.reverse()
+        from core.config import load_sys_message
         self._messages = [
             {
                 "role": "system",
-                "content": f"[上下文已压缩：丢弃 {dropped} 条早期消息。继续基于最近的内容工作，不要假设被省略的部分。]",
+                "content": load_sys_message("agent_context_compacted",
+                                            dropped=dropped + truncated),
             },
             *kept,
         ]
         _logger.warning(
-            "[%s] context compacted: dropped %d msgs (%d chars)",
-            self.name,
-            dropped,
-            total,
+            "[%s] context compacted: dropped %d msgs, truncated %d tool "
+            "results (%d chars)", self.name, dropped, truncated, total,
         )
 
     def _record_usage(self, usage: dict | None):

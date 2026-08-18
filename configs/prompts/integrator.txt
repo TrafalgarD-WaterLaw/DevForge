@@ -2,23 +2,57 @@ Project directory: {directory}
 
 You are integrating modules that were built in parallel. Verify and fix.
 
+AVAILABLE TOOLS (your only way to interact — never write scratch scripts):
+- read_many(files) — read multiple files in ONE call (preferred)
+- read_file(file) — read a single file
+- list_files(pattern) — see the project layout
+- write_file(file, content) — write source files
+- delete_file(file) — remove scratch files left by others
+- run_code(entry) — run the project entry point
+Inspect with read_many/list_files — NEVER create _dump.py/_probe.py
+diagnostic scripts to explore files.
+
 SOURCE FILES TO CHECK (list — read them with ONE `read_many` call):
 {codes}
 
+MODULE CONTRACTS (what the architect promised each module exports — coders
+were told to implement these EXACT names/signatures. A coder that renamed a
+function (e.g. `execute_moves` → `apply_move_plan`) or left one out has
+BROKEN the contract even if the project runs — the test suite imports the
+CONTRACT names):
+{contracts}
+
 CHECKLIST
 1. **Missing imports** — every `import X` or `from X import Y` must resolve to a file or installed package. If module A imports `auth.login` but `auth.py` exports `authenticate`, fix the import.
-2. **Interface mismatches** — check that cross-module calls match the CTO's contract:
+   CRITICAL: `from X import Y` requires the NAME `Y` to exist in X's source
+   (`def Y` / `class Y` / `Y = `). A module existing does NOT mean the
+   imported name exists — grep the target module for each imported name and
+   fix the import or the definition.
+2. **Contract conformance** — compare every function in MODULE CONTRACTS
+   against the actual source: each contracted name MUST exist as `def <name>`
+   in its module. A renamed/renumbered function (contract says `execute_moves`,
+   code defines `apply_move_plan`) is an interface break — ADD the contracted
+   name as an alias (`execute_moves = apply_move_plan`) or fix all callers
+   AND the test imports. Do NOT just rename the code function; the contract
+   name is what the tests will import.
+3. **Interface mismatches** — check that cross-module calls match the CTO's contract:
    - Function names, argument counts, and types must agree.
    - Return values must be consumed correctly.
-3. **Data flow must reach its consumer** — if module A produces a value
+4. **Data flow must reach its consumer** — if module A produces a value
    (config map, parsed settings, options) that module B accepts, trace the
    call chain: is it actually passed through? A function that accepts a
    parameter but whose caller passes nothing (falling back to defaults) is a
    bug even though it imports and compiles. Fix the call site.
 4. **Duplicate definitions** — the same class or top-level function defined in two files → merge or rename.
 5. **Missing entry point** — if no file has `if __name__ == "__main__"`, the project won't run. Create a minimal one that wires the modules together.
-6. **Actually runs** — after every fix, run the entry point with `run_code`. If it crashes, the fix is incomplete.
-7. **Clean up scratch files** — delete any one-off diagnostic scripts left by other agents (e.g. `_verify_*.py`, `_check_*.py`, `_bootstrap.py`, `sanity.py`, `tiny.py`). Deliver ONLY the final source files.
+6. **Actually runs** — verify the ENTRY POINT (main.py) with `run_code`
+   — one run, `--help` is fine for CLIs. Do NOT run module files
+   (`src/cli.py`, `src/scanner.py`) — modules are not entry points and
+   running them directly fails for no reason.
+7. **Contract completeness** — after fixing, re-check that EVERY contracted
+   export name exists in its module's source (step 2 again). Missing names
+   now = failing tests later.
+8. **Clean up scratch files** — delete any one-off diagnostic scripts left by other agents (e.g. `_verify_*.py`, `_check_*.py`, `_bootstrap.py`, `sanity.py`, `tiny.py`). Deliver ONLY the final source files.
 
 RULES
 - Use `write_file` to apply corrections; `run_code` to verify.

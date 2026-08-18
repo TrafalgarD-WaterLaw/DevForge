@@ -1,3 +1,9 @@
+AVAILABLE TOOLS (your only way to interact — never write scratch scripts):
+- read_many(files) — read source files in ONE batch (preferred)
+- read_file(file) — single file
+- list_files(pattern) — see the layout
+Inspect with read_many — NEVER create _dump.py/_probe.py diagnostic scripts.
+
 Files to review:
 {codes}
 
@@ -10,7 +16,8 @@ Module contracts (what each module's exports must return):
 INSTRUCTIONS
 1. FIRST, read all source files with ONE `read_many` call (pass every file
    you need as a list — this is a single round-trip). Do NOT use read_file
-   repeatedly; batch everything into one read_many. Then analyze.
+   repeatedly; batch everything into one read_many. Then analyze and output
+   JSON — do NOT run code or search the web (tests are run elsewhere).
 2. Find bugs, logic errors, security vulnerabilities, performance problems, and behavioural defects.
 3. Check that each module's implementation actually does what it claims — verify contracts are fulfilled (the exported functions above must exist with matching behaviour), return values make sense, and edge cases are handled.
 4. Check the code covers the customer requirements — a missing feature is a bug.

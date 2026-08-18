@@ -20,14 +20,10 @@ cc-example
 configs/default.json
 .env
 
-# 开发文档仅本地保留
+# 开发文档 / 测试 / 评测仅本地保留（公开仓库不含）
 docs/
-
-# benchmark 运行产物（评测日志/结果，非源码）
-benchmarks/results.json
-benchmarks/results_all.json
-benchmarks/last_run.log
-benchmarks/.memory/
+benchmarks/
+tests/
 demo_files/
 demo/
 

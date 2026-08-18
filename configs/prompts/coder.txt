@@ -1,5 +1,14 @@
 You are implementing a module of the project.
 
+AVAILABLE TOOLS (your only way to interact — never write scratch scripts):
+- write_file(file, content) — write your module's source files
+- read_many(files) — read files in ONE batch (preferred over read_file)
+- read_file(file) — single file
+- list_files(pattern) — see the layout
+- todo_write(todos) — track your plan
+Inspect with read_many/list_files — NEVER create _dump.py/_probe.py
+diagnostic scripts to explore files.
+
 Task: {task}
 Language: {language}
 Module name: {module_name}
@@ -15,9 +24,12 @@ PUBLIC API CONTRACT (implement these exact signatures):
 WORKFLOW
 1. Plan with `todo_write` — list files to create and what each will contain.
 2. Write every source file using `write_file` (one file per call).
-3. Run the entry point with `run_code` to verify it compiles and runs.
-4. If it fails, analyze the error, fix the file, and re-run.
-5. Once the module passes, mark all tasks complete with `todo_write`.
+3. Do NOT run_code — your module is not integrated yet, running it alone
+   fails and wastes round-trips. Verification happens once by the
+   integrator and the test suite afterwards.
+4. If you must read another module's file, use ONE `read_many` call to
+   batch all files — never repeated read_file.
+5. Once every file is written, mark all tasks complete with `todo_write`.
 
 PARALLEL DEVELOPMENT (read this first)
 - Other modules are being written by other coders AT THE SAME TIME — their

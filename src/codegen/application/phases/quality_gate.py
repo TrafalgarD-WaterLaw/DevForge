@@ -44,10 +44,11 @@ class QualityGate(Phase):
         if not directory:
             return False, "", False
         from codegen.application.phases.verification import run_project_tests
+        from codegen.application.process import run_process
 
         return run_project_tests(
             directory,
-            self._run_process,
+            run_process,
             entry_point=self.blackboard.get("entry_point", ""),
         )
 
@@ -109,31 +110,3 @@ class QualityGate(Phase):
             return int(m.group(1))
         m = re.search("Coverage:\\s*([\\d.]+)%", output)
         return int(round(float(m.group(1)))) if m else None
-
-    def _run_process(self, cmd, cwd, timeout):
-        """同 Verification._run_process 的轻量版（质检用）。"""
-        import subprocess
-
-        try:
-            p = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=cwd,
-                stdin=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
-                if __import__("os").name == "nt"
-                else 0,
-            )
-            try:
-                out, err = p.communicate(timeout=timeout)
-                return (out, err, p.returncode)
-            except subprocess.TimeoutExpired:
-                try:
-                    p.kill()
-                except OSError:
-                    pass
-                out, err = p.communicate()
-                return (out, err, p.returncode)
-        except OSError as ex:
-            return (b"", str(ex).encode(), 1)

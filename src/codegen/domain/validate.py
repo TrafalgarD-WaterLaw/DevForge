@@ -101,7 +101,9 @@ def validated_react(
         if not errors:
             return instance_data
         if attempt < retries:
-            msg = f"Your previous output failed validation: {'; '.join(errors)}. Fix these and output again."
+            from core.config import load_sys_message
+            msg = load_sys_message("validate_retry_again",
+                                   errors="; ".join(errors))
             print(f"  [{agent.name}] schema invalid ({errors}) — retrying", flush=True)
             instance_data = agent.react(msg, json_mode=json_mode)
         else:

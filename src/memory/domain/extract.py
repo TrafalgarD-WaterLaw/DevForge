@@ -64,9 +64,14 @@ def extract_phase_entry(project: str, phase: str, blackboard) -> MemoryEntry | N
 
         if phase == "Verification":
             issues_all = []
-            for key in blackboard._data:
-                if key.startswith("review_") and key not in _REVIEW_META_KEYS:
-                    for issue in blackboard[key]:
+            # 防御式访问：_data 是私有属性，且 review_ 键的值可能是非
+            # list（历史 checkpoint 的字符串等）—— 直接遍历会崩掉整个
+            # 阶段记忆提取
+            bb_data = getattr(blackboard, "_data", {}) or {}
+            for key, value in bb_data.items():
+                if key.startswith("review_") and key not in _REVIEW_META_KEYS \
+                        and isinstance(value, list):
+                    for issue in value:
                         tags += [issue.get("file", ""), issue.get("severity", "")]
                         issues_all.append(issue)
             return MemoryEntry(
@@ -110,10 +115,12 @@ def extract_function_entries(project: str, blackboard) -> list[MemoryEntry]:
     codes = getattr(blackboard, "codes", {}) if hasattr(blackboard, "codes") else {}
 
     issues_by_file: dict[str, list] = {}
-    for key in blackboard._data:
+    bb_data = getattr(blackboard, "_data", {}) or {}
+    for key, value in bb_data.items():
         # review_ 前缀含元数据键（review_valid/review_discarded），要排除
-        if key.startswith("review_") and key not in _REVIEW_META_KEYS:
-            for issue in blackboard[key]:
+        if key.startswith("review_") and key not in _REVIEW_META_KEYS \
+                and isinstance(value, list):
+            for issue in value:
                 fname = issue.get("file", "")
                 issues_by_file.setdefault(fname, []).append(issue)
 
@@ -133,18 +140,18 @@ def extract_function_entries(project: str, blackboard) -> list[MemoryEntry]:
                 str(i.get("description", "")) + " " + str(i.get("file", ""))
                 for issues in issues_by_base.values() for i in issues)
 
-            def _state(fn_name: str, mod_files: list) -> str:
+            def _state(fn_name: str) -> str:
                 pattern = re.compile(rf"\b{re.escape(fn_name)}\b")
                 if pattern.search(issue_blob):
                     return "has-issues"
                 return "unreviewed"
         else:
             # 查过且问题为空 → 全部 verified（修复后复查通过）
-            def _state(fn_name: str, mod_files: list) -> str:
+            def _state(fn_name: str) -> str:
                 return "verified"
     else:
         # 最终轮没有有效审查（全部被丢弃/未运行）→ 不标 verified
-        def _state(fn_name: str, mod_files: list) -> str:
+        def _state(fn_name: str) -> str:
             return "unreviewed"
 
     for mod in modules:
@@ -163,7 +170,7 @@ def extract_function_entries(project: str, blackboard) -> list[MemoryEntry]:
                 project=project,
                 phase="Function",
                 tags=_clean_tags([
-                    mod["name"], fn_name, _state(fn_name, mod_files),
+                    mod["name"], fn_name, _state(fn_name),
                 ]),
                 summary=f"{fn_name}{fn_sig} — {fn_desc}",
                 detail=code_snippet[:8000] or f"{fn_name}{fn_sig} — {fn_desc}",

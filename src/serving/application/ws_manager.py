@@ -85,6 +85,10 @@ def _stamp_sequence(entry: dict, event: dict) -> dict:
         entry["_seq"] = seq + 1
     return event
 
+# 合并后的单条 delta 长度上限：超出后截断（一次超长流式输出不会让
+# 单条事件无限膨胀——重放时只缺尾部文本，关键事件照常保留）
+_MAX_DELTA_CHARS = 200_000
+
 def _merge_stream_delta(entry: dict, event: dict) -> bool:
     """同 agent 的连续 llm_delta 在缓冲里累积为一条。一次长流式输出可达
     上千条 delta，会把缓冲挤满，把 phase_start/里程碑等关键事件全挤出
@@ -95,8 +99,8 @@ def _merge_stream_delta(entry: dict, event: dict) -> bool:
     last = events[-1] if events else None
     if last and last.get("event") == "llm_delta" \
             and last.get("agent") == event.get("agent"):
-        last["delta"] = ((last.get("delta") or "")
-                         + event.get("delta", ""))
+        merged = (last.get("delta") or "") + event.get("delta", "")
+        last["delta"] = merged[:_MAX_DELTA_CHARS]
         return True
     return False
 
