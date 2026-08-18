@@ -109,6 +109,10 @@ def run_pipeline(run_id: str, task: str, start_from: str = "",
         chain = ChatChain(
             config=load_pipeline_config(pipeline), task_prompt=task,
             run_id=run_id, start_from=start_from, project_dir=project_dir)
+        # 运行中即设置 project_dir —— 阶段边界增量落盘 run_events.json
+        # 需要它（此前只在完成/失败时设置，中途崩溃日志全丢）
+        from serving.infrastructure.run_repository import set_run_dir
+        set_run_dir(run_id, chain.blackboard.get("directory", ""))
         started = time.time()
         project_dir = chain.run()
         complete_run(run_id, project_dir)
@@ -124,12 +128,15 @@ def run_pipeline(run_id: str, task: str, start_from: str = "",
             "qg_loops": chain.blackboard.get("quality_gate_loops", 0),
         })
     except Exception as exc:
-        # 完整 traceback 进错误信息 + 落盘 crash.log（调试阶段：定位崩溃点）
+        # 完整 traceback 进错误信息 + 落盘 crash.log（调试阶段：定位崩溃点）。
+        # 路径用项目根（此前硬编码 E:/projects/ChatDev 迁仓后写不到，
+        # 异常又被吞掉 → 崩溃日志全部静默丢失）
         import traceback as _tb
+        from core.config import _project_root
         detail = f"{str(exc)}\n{_tb.format_exc()[-2000:]}"
         try:
-            with open("E:/projects/ChatDev/crash.log", "a",
-                      encoding="utf-8") as _f:
+            crash_path = _project_root() / "crash.log"
+            with open(crash_path, "a", encoding="utf-8") as _f:
                 _f.write(f"\n=== {run_id} {time.time()} ===\n{detail}\n")
         except Exception:
             pass

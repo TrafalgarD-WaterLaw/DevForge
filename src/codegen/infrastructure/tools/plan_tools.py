@@ -53,6 +53,10 @@ def todo_write(todos: list[dict]):
         return "Error: no blackboard available"
 
     bb["_todos"] = todos
+    # per-agent 记录：并行 coder 各自维护自己的 todo（此前全局 `_todos`
+    # 键被并行 agent 互相覆盖，前端面板只显示最后写入者）
+    agent = rt.current_agent or "?"
+    bb.setdefault("_todos_by_agent", {})[agent] = todos
     done = sum(1 for t in todos if t.get("status") == "completed")
     total = len(todos)
 

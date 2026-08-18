@@ -47,6 +47,12 @@ class ChatChain:
         self.start_time = time.strftime("%Y%m%d_%H%M%S")
         _OUT_DIR.mkdir(exist_ok=True)
 
+        # iterate.json 单独跑（pipeline=["Iterate"]）且未指定 project →
+        # 自动定位最近一次同任务的交付目录；无历史交付则明确报错
+        #（此前拿到空 blackboard 凭空"修改"一个不存在的项目）
+        if not project_dir and not start_from and self.phases == ["Iterate"]:
+            project_dir = self._resolve_iterate_target()
+
         out_dir = self._resolve_output_dir(project_dir, start_from)
         self._restore_checkpoint(out_dir, project_dir, start_from)
         self._write_task_files(out_dir, task_prompt, project_dir)
@@ -55,6 +61,17 @@ class ChatChain:
         import codegen.application.phases  # noqa: F401
 
     # ── 装配子步骤（二轮拆分：__init__ 88 行 → 编排 + 子步骤）──
+
+    def _resolve_iterate_target(self) -> str:
+        """iterate.json 单独跑（无 project 参数）→ 自动定位最近一次同任务
+        交付目录；无历史交付则报错（此前拿到空 blackboard 凭空修改）。"""
+        out_dir = self._find_existing_dir()
+        if not out_dir:
+            raise ChatChainError(
+                "Iterate 流水线需要指定 project —— WareHouse 中未找到该任务"
+                "的历史交付（请通过项目页的'迭代'按钮发起，或 /api/run 传 "
+                "project= 参数）")
+        return str(out_dir)
 
     def _resolve_output_dir(self, project_dir: str,
                             start_from: str) -> Path:
@@ -149,8 +166,9 @@ class ChatChain:
             from core.config import load_pipeline_config
             return load_pipeline_config().get("pipeline", [])
         except Exception:
+            # 与 configs/default.json 的 pipeline 顺序保持一致（质检后文档）
             return ["RequirementsDiscussion", "Design", "Coding",
-                    "Verification", "Documentation", "QualityGate"]
+                    "Verification", "QualityGate", "Documentation"]
 
     def _find_existing_dir(self) -> Path | None:
         """Find the most recent project directory for the current task."""

@@ -34,6 +34,27 @@ def _safe_path(filename: str) -> str:
         raise ValueError(f"Path escapes workspace: {filename}")
     return resolved
 
+def _module_write_allowlist(agent: str) -> set[str] | None:
+    """并行 coder 的文件白名单（硬约束）：agent 名 = 模块名时，只允许写
+    该模块设计指定的文件（缺省 {module}.py）。integrator/fixer/tester 等
+    非模块 agent 返回 None = 不限。
+
+    此前所有 coder 共享整个 project_dir，可以覆盖任何文件（README
+    "coder 只读写自己的文件"不成立）—— 这里在平台层按模块名拦截。
+    """
+    if not agent:
+        return None
+    bb = runtime().blackboard
+    if bb is None:
+        return None
+    modules = bb.get("modules") or []
+    for mod in modules:
+        if mod.get("name") == agent:
+            files = [f for f in (mod.get("files") or []) if isinstance(f, str)] \
+                or [f"{agent}.py"]
+            return {os.path.normpath(f) for f in files}
+    return None
+
 @register(
     name="read_file",
     description="Read a file's contents from the current project. "
@@ -114,6 +135,19 @@ def write_file(filename: str, content: str) -> str:
         return (f"Error: '{filename}' looks like a diagnostic scratch file — "
                 "do NOT create it. Inspect the project with read_many/"
                 "list_files instead, and deliver only real source files.")
+    # 内部目录保护（与 read_file/edit_file 一致）：agent 不应写入
+    # .devforge/checkpoint.json / .git / .venv 等平台与依赖目录
+    rel = os.path.relpath(path, os.path.realpath(runtime().project_dir))
+    if set(rel.split(os.sep)) & _READ_SKIP:
+        return (f"Error: '{filename}' is inside an internal directory "
+                f"({_READ_SKIP & set(rel.split(os.sep))}) — not writable.")
+    # 模块文件白名单（并行 coder 隔离）：agent 名 = 模块名时只能写本模块
+    # 设计指定的文件 —— 两个 coder 不能互相覆盖对方的文件
+    allowed = _module_write_allowlist(runtime().current_agent)
+    if allowed is not None and os.path.normpath(rel) not in allowed:
+        return (f"Error: '{filename}' is not in your module's file list — "
+                "you may only write your own module files: "
+                f"{sorted(allowed)}")
     if len(content) > _MAX_WRITE_CHARS:
         return (f"Error: '{filename}' would be {len(content)} chars — over the "
                 f"{_MAX_WRITE_CHARS} limit. You must write only your own source "
@@ -199,8 +233,14 @@ def read_many(files: list) -> str:
         total += len(content)
     result = "\n".join(parts)
     if total > _MAX_BATCH_CHARS:
-        result = result[:_MAX_BATCH_CHARS] + \
-            f"\n…(batch output truncated {total} → {_MAX_BATCH_CHARS} chars)"
+        # 头尾保留（同 registry 截断策略）：列表靠后的文件内容在尾部，
+        # 只留头部会让模型以为后面的文件被读了
+        head_chars = int(_MAX_BATCH_CHARS * 0.4)
+        tail_chars = _MAX_BATCH_CHARS - head_chars
+        marker = (f"\n…(batch output truncated {total} → "
+                  f"{_MAX_BATCH_CHARS} chars, 保留开头 {head_chars}"
+                  f" + 结尾 {tail_chars})\n")
+        result = result[:head_chars] + marker + result[-tail_chars:]
     return result
 
 @register(

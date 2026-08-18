@@ -3,15 +3,20 @@
 A3/B5: 先跑自动化测试（e2e 行为证据）→ 测试输出注入 inspector prompt →
 测试失败或覆盖率低于阈值（quality_gate_min_coverage）时追加 feature 项
 并降级 verdict（PASS→WARN）—— 质检不再只看"文本里有没有提到功能"。
+Q1: 平台契约硬门禁 —— AST 复查契约 exports，缺口直接 FAIL（inspector
+按需求 features 打分，模块间契约缺口它看不到，平台兜底）。
 """
 
 import json
+import logging
 import re
 from core.config import load_pipeline_config
 from core.events import HookRegistry
 from codegen.domain.phase import Phase
 from codegen.domain.registry import register_phase
 from codegen.domain.validate import validated_react
+
+_log = logging.getLogger(__name__)
 
 @register_phase
 class QualityGate(Phase):
@@ -20,6 +25,23 @@ class QualityGate(Phase):
     def run(self):
         req = self.blackboard.get("requirements", {})
         if not req or not self.blackboard.codes:
+            # 无需求或无代码 → 显式 FAIL（此前静默 return，verdict 为空，
+            # 回跳/失败标记全部失效 —— Coding 阶段"未生成任何代码文件"
+            # 被无声放过。platform 项会触发回跳 → 二跳升级 Design 重设计）
+            notes = ("缺少需求定义（PM 未产出 summary）" if not req
+                     else "未生成任何代码文件（coder 输出缺失）")
+            result = {
+                "verdict": "FAIL",
+                "score": 0,
+                "features": [{
+                    "name": "代码产出",
+                    "status": "NO",
+                    "notes": notes,
+                    "source": "platform",
+                }],
+            }
+            self.blackboard["quality_gate"] = result
+            HookRegistry.trigger("quality_gate", data=result)
             return
         # 质检阶段静默工具事件（inspector read_file 刷屏）
         self.blackboard["_quiet_tools"] = True
@@ -28,6 +50,7 @@ class QualityGate(Phase):
             result = self._inspect(req, test_output)
             result = self._apply_evidence_gates(
                 result, has_bugs and not infra_failed, test_output)
+            result = self._apply_platform_gates(result)
         finally:
             self.blackboard["_quiet_tools"] = False
         self.blackboard["quality_gate"] = result
@@ -100,6 +123,43 @@ class QualityGate(Phase):
                 verdict = "WARN"
         result["features"] = features
         result["verdict"] = verdict
+        return result
+
+    def _apply_platform_gates(self, result: dict) -> dict:
+        """平台契约硬门禁：AST 复查契约 exports vs 源码，缺口 → 追加
+        source="platform" 的 feature 项 + verdict 降为 FAIL。
+
+        inspector 按需求 features 打分，模块间契约缺口（设计声明但源码
+        缺失的导出）它看不到 —— 平台在此兜底。pipeline 的回跳 missing
+        只排除 evidence 项，platform 项会触发回跳/升级（同缺口二跳
+        Design 重新设计），直到契约完整才交付。
+        """
+        directory = self.blackboard.get("directory", "")
+        modules = self.blackboard.get("modules", [])
+        gaps = []
+        if directory and modules:
+            try:
+                from codegen.application.phases.coding import contract_gap_check
+                gaps = contract_gap_check(directory, modules)
+            except Exception:
+                _log.exception("Platform contract gate failed")
+        if not gaps:
+            return result
+        missing_names = "、".join(
+            g.strip().lstrip("- ").split(" 契约声明但源码未定义")[0]
+            for g in gaps[:5])
+        features = list(result.get("features") or [])
+        features.append({
+            "name": "模块契约完整性",
+            "status": "NO",
+            "notes": f"契约声明但源码缺失: {missing_names}"
+                     + (f" 等 {len(gaps)} 处" if len(gaps) > 5 else ""),
+            "source": "platform",
+        })
+        result["features"] = features
+        result["verdict"] = "FAIL"
+        print(f"  [QualityGate] 平台契约检查：{len(gaps)} 处缺口 → FAIL",
+              flush=True)
         return result
 
     @staticmethod

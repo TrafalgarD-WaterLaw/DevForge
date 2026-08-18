@@ -9,6 +9,70 @@ from memory.domain.models import MemoryEntry
 
 _log = logging.getLogger(__name__)
 
+# 错误签名提取（M1 learn_fix_pattern）：从测试输出/错误文本中用规则提取，
+# 不调 LLM —— 确定性、零成本。按优先级匹配，取第一条命中。
+# 元组 = (正则, 类型标签)；"__TYPE__" = 类型从捕获组 1 取（异常类名）。
+_FIX_SIG_PATTERNS = (
+    (r"ModuleNotFoundError:\s*No module named ['\"]([^'\"]+)['\"]",
+     "ModuleNotFoundError"),
+    (r"ImportError:\s*cannot import name ['\"]([^'\"]+)['\"]",
+     "ImportError"),
+    (r"NameError:\s*name ['\"]([^'\"]+)['\"] is not defined",
+     "NameError"),
+    (r"AttributeError:\s*['\"]?([^'\"]{1,40})['\"]?",
+     "AttributeError"),
+    (r"(TypeError|ValueError|KeyError|IndexError|AssertionError):\s*(.{1,80})",
+     "__TYPE__"),
+    (r"FAILED\s+(\S+)",
+     "TestFailure"),
+)
+
+def _extract_error_signature(output: str) -> str:
+    """从输出提取结构化错误签名（如 "ModuleNotFoundError: yaml"、
+    "AssertionError: expected 2"）；无命中返回 ""。"""
+    for pat, kind in _FIX_SIG_PATTERNS:
+        m = re.search(pat, output or "")
+        if not m:
+            continue
+        if kind == "__TYPE__":
+            return f"{m.group(1)}: {(m.group(2) or '').strip()[:80]}"
+        name = (m.group(1) or "").strip()[:80]
+        return f"{kind}: {name}" if name else kind
+    return ""
+
+def extract_fix_pattern(
+    project: str, before_codes: dict, after_codes: dict,
+    test_output: str,
+) -> MemoryEntry | None:
+    """修复轮后提取修复模式（M1）：只提取"验证过的修复"（调用方保证
+    修复后测试通过）。返回 None = 无变化/无错误签名。
+
+    detail 存修复前后对照（before[:300] + after[:800]），tags 存错误类型
+    与变化文件名 —— 召回按错误签名 + 文件名关键词。
+    """
+    changed = [f for f in after_codes
+               if before_codes.get(f) != after_codes.get(f)]
+    if not changed:
+        return None
+    sig = _extract_error_signature(test_output)
+    if not sig:
+        return None
+    fname = changed[0]
+    before = (before_codes.get(fname) or "")[:300]
+    after = (after_codes.get(fname) or "")[:800]
+    tags = [sig.split(":", 1)[0], fname] \
+        + [f.split("/")[-1] for f in changed[:3]]
+    return MemoryEntry(
+        id=f"{project}-fix-{re.sub(r'[^\\w]', '_', sig)[:40]}",
+        project=project,
+        phase="FixPattern",
+        tags=_clean_tags(tags),
+        summary=f"{sig} — 修复 {len(changed)} 个文件",
+        detail=f"### 修复前 ({fname})\n{before}\n\n"
+               f"### 修复后 ({fname})\n{after}",
+        timestamp=time.time(),
+    )
+
 def _clean_tags(tags: list) -> list[str]:
     """Drop None / non-str / blank tags — '' and '  ' would pollute recall."""
     return [t for t in tags if isinstance(t, str) and t.strip()]

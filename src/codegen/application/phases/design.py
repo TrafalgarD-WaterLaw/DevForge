@@ -25,6 +25,30 @@ class Design(Phase):
                 + "\n- ".join((str(f) for f in feedback))
             )
             self.blackboard["user_feedback"] = []
+        # 质检升级回跳（Q0：同缺口二跳 Design）—— CTO 重新设计时必须知道
+        # 上一轮交付哪里没达标，否则会重蹈覆辙
+        qg_fb = self.blackboard.get("qg_feedback", "")
+        if qg_fb:
+            speaker_prompt += (
+                "\n\nQUALITY GATE FEEDBACK（上一轮质检 FAIL，以下功能未达标，"
+                "本次设计必须覆盖它们 —— 调整模块划分/契约使每个功能有归属）:\n"
+                + qg_fb
+            )
+            self.blackboard["qg_feedback"] = ""
+        # 运行中追加需求的完整历史（此前只记录不消费，第二次追加需求时
+        # CTO 看不到第一次的反馈）—— 最近 3 次一并纳入本次设计
+        history = self.blackboard.get("requirements_history") or []
+        if history:
+            past = []
+            for h in history[-3:]:
+                fb = h.get("feedback") or []
+                if fb:
+                    past.append("· ".join(str(f) for f in fb))
+            if past:
+                speaker_prompt += (
+                    "\n\nPREVIOUS USER ADDITIONS（本 run 早前追加的需求，"
+                    "仍需满足）:\n- " + "\n- ".join(past)
+                )
         converse(
             speaker=cto,
             listener=cpo,

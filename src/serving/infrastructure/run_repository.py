@@ -74,6 +74,14 @@ def complete_run(run_id: str, project_dir: str) -> None:
         _active_runs[run_id]["status"] = RunStatus.COMPLETE
         _active_runs[run_id]["project_dir"] = project_dir
 
+def set_run_dir(run_id: str, project_dir: str) -> None:
+    """运行中设置 project_dir（不改状态）—— 供阶段边界增量落盘
+    persist_run 使用（此前 project_dir 只在 complete/fail 时才有值，
+    中途崩溃时 run_events.json 无从写入）。"""
+    entry = _active_runs.get(run_id)
+    if entry is not None:
+        entry["project_dir"] = project_dir
+
 def fail_run(run_id: str, error: str) -> None:
     if run_id in _active_runs:
         _require_transition(run_id, _active_runs[run_id]["status"],

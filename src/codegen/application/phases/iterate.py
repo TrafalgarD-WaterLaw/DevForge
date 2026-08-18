@@ -25,7 +25,7 @@ class Iterate(Phase):
         self.blackboard.reload_codes(directory)
         before = dict(self.blackboard.codes)
         engineer = self.agent("iteration_engineer")
-        result = engineer.react(
+        engineer.react(
             self.prompt(
                 "iteration_engineer",
                 feedback=feedback,
@@ -35,11 +35,9 @@ class Iterate(Phase):
             stream=False,
         )
         self.blackboard.reload_codes(directory)
-        changed = [f for f, c in self.blackboard.codes.items() if before.get(f) != c]
-        removed = [f for f in before if f not in self.blackboard.codes]
-        from codegen.application.phases.verification import Verification
-
-        has_bugs, test_output, _infra = Verification(self.blackboard)._run_tests()
+        changed = self._changed_since(before)
+        removed = self._removed_since(before)
+        has_bugs, test_output, _infra = self._run_tests_here()
         # 回归失败 ≠ 交付：反馈 iteration_engineer 修复源码（≤1 次）——
         # 之前只报告不修，用户追加需求改挂了现有功能也照样交付
         if has_bugs and not _infra:
@@ -48,11 +46,29 @@ class Iterate(Phase):
             engineer.react(load_sys_message(
                 "iteration_engineer_regression", output=test_output[:1500]))
             self.blackboard.reload_codes(directory)
-            changed = [f for f, c in self.blackboard.codes.items()
-                       if before.get(f) != c]
-            removed = [f for f in before if f not in self.blackboard.codes]
-            has_bugs, test_output, _infra = \
-                Verification(self.blackboard)._run_tests()
+            changed = self._changed_since(before)
+            removed = self._removed_since(before)
+            has_bugs, test_output, _infra = self._run_tests_here()
+        # 人工审阅：拒绝 → 携带反馈重做 1 次（用户拒绝 ≠ 交付，此前
+        # iterate_rejected 写入后无人消费，拒绝被静默忽略）
+        if changed:
+            self._request_review(changed)
+        rejected = self.blackboard.get("iterate_rejected", "")
+        if rejected:
+            self.blackboard["iterate_rejected"] = ""
+            print("  [Iterate] 用户拒绝迭代改动 — 携带反馈重做 1 次", flush=True)
+            from core.config import load_sys_message
+            engineer.react(load_sys_message(
+                "iteration_engineer_rejected", feedback=rejected))
+            self.blackboard.reload_codes(directory)
+            changed = self._changed_since(before)
+            removed = self._removed_since(before)
+            has_bugs, test_output, _infra = self._run_tests_here()
+            if has_bugs and not _infra:
+                engineer.react(load_sys_message(
+                    "iteration_engineer_regression", output=test_output[:1500]))
+                self.blackboard.reload_codes(directory)
+                has_bugs, test_output, _infra = self._run_tests_here()
         summary = {
             "message": f"迭代完成: 修改 {len(changed)} 个文件"
             + (f"，删除 {len(removed)} 个" if removed else "")
@@ -66,8 +82,6 @@ class Iterate(Phase):
             content=json.dumps(summary, ensure_ascii=False),
             turn=0,
         )
-        if changed:
-            self._request_review(changed)
         self.blackboard["iterate_changed"] = changed
         try:
             from codegen.application.phases.coding import Coding
@@ -81,6 +95,17 @@ class Iterate(Phase):
             logging.getLogger(__name__).warning(
                 "Iterate: 文档同步失败（不影响代码交付）"
             )
+
+    def _changed_since(self, before: dict) -> list:
+        return [f for f, c in self.blackboard.codes.items() if before.get(f) != c]
+
+    def _removed_since(self, before: dict) -> list:
+        return [f for f in before if f not in self.blackboard.codes]
+
+    def _run_tests_here(self):
+        """跑回归测试（返回 (has_bugs, output, infra_failed)）。"""
+        from codegen.application.phases.verification import Verification
+        return Verification(self.blackboard)._run_tests()
 
     def _request_review(self, changed: list):
         """迭代改动的 diff 送人工审阅（headless 无 ws 自动通过）。"""

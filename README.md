@@ -5,7 +5,7 @@
 **一句话需求 → 虚拟软件公司协作（PM/CTO/程序员/审查员/质检）→ 可运行的项目**
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
-[![tests: 221 passed](https://img.shields.io/badge/tests-221%20passed-green)]()
+[![tests: 260 passed](https://img.shields.io/badge/tests-260%20passed-green)]()
 [![Vue 3](https://img.shields.io/badge/frontend-Vue%203-42b883)]()
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-green)](LICENSE)
 
@@ -35,12 +35,13 @@
 
 ## 🛠 核心功能
 
-- **🤖 多智能体流水线** — 8 个阶段（需求澄清 → 设计 → 编码 → 整合 → 测试 → 审查 → 修复 → 质检），10+ 个角色分工协作，coder 并行写模块
-- **👁 全程实时可视化** — WebSocket 事件流驱动 Vue 3 前端：像素办公室动画、agent 对话、审查卡片、质检结论，断线可回放
-- **🧠 跨项目记忆** — ChromaDB 沉淀"阶段方案"与"已验证的函数级代码"，后续项目自动召回复用
-- **🔁 质量闭环** — tester 写测试 → 4 视角审查（安全/正确性/性能/逻辑）→ fixer 修复 → 质检 FAIL 自动回跳重修
-- **🛡 Docker 沙箱执行** — 生成代码跑在隔离容器（代理免疫、依赖自动安装），宿主机直跑时危险操作静态拦截
-- **💸 成本工程** — 工具批量读取、上下文压缩、token 预算熔断，一次 run 的花费可预期
+- **🤖 多智能体流水线** — 6 个主阶段 + 动态增量迭代（需求澄清 → 设计 → 编码 → 验证 → 质检 → 文档），10+ 个角色分工协作，coder 并行写模块；流水线拓扑（阶段顺序、错误重试、质检回跳/升级目标）由 `pipeline_spec` 配置声明式驱动
+- **👁 全程实时可视化** — WebSocket 事件流驱动 Vue 3 前端：像素办公室动画、agent 对话、审查卡片、质检结论，断线可回放；每阶段 token 消耗实时统计（`phase_usage` 事件）
+- **🧠 跨项目记忆** — ChromaDB 沉淀"阶段方案"、"已验证的函数级代码"与"修复模式"（learn_fix_pattern：错误签名 → 修复对照，只收验证过的），后续项目自动召回复用
+- **🔁 质量闭环** — tester 写测试 → reviewer×4 并行审查（**带真实测试证据**）→ fixer 修复 → 平台 AST 契约硬门禁 → 质检 FAIL 回跳重修，**同缺口二跳自动升级重设计**，不再只压给 fixer
+- **🛡 执行安全** — 生成代码跑在 Docker 沙箱（代理免疫、依赖自动安装）；宿主机回退时静态扫描分级（项目根内文件操作放行）+ **运行期沙箱 shim**（逃逸项目根/系统临时目录即拦截）
+- **💸 成本工程** — 工具批量读取、上下文压缩（头尾保留截断）、结果缓存、**阶段 token 预算统计**、全局熔断（默认 500k 预警 / 900k 硬停），失败不会无限烧钱
+- **💾 断点与恢复** — 阶段 checkpoint + 事件增量落盘（服务中途被杀不丢运行记录）+ **agent 对话历史归档**（同阶段重跑自动恢复上下文，不再"失忆"）
 
 ---
 
@@ -76,12 +77,12 @@ DevForge 的目标：**一句话需求 → 一个跑得起来、测得过、看�
 - DevForge 把过程变成流水线：**PM 澄清需求 → CTO 设计架构 → coder 并行编码 → tester 写测试 → 4 个审查者挑毛病 → fixer 修复 → 质检打分**。每一步有专门角色和验证动作，最终质检不达标就回跳重修——不是一次赌运气
 
 **2. 多 agent 并行，接口怎么不错位？**
-- 5 个 coder 同时写模块，谁都看不见别人的代码——`cli` 调 `organizer` 的函数没传参数，这种错位在普通流程里要等集成时才暴露
-- DevForge 在 Design 阶段由 CTO 定义每个模块的**接口契约**（导出函数 + 签名），coder 只按契约写；integrator 对账；平台层再 AST 校验契约完整性——缺失的导出直接报告出来强制修复，不靠 agent 自觉
+- 多个 coder 同时写模块，谁都看不见别人的代码——`cli` 调 `organizer` 的函数没传参数，这种错位在普通流程里要等集成时才暴露
+- DevForge 在 Design 阶段由 CTO 定义每个模块的**接口契约**（导出函数 + 签名），coder 只按契约写；integrator 对账；平台层再 AST 校验契约完整性（编码整合前注入 integrator 强制修复，质检时 AST 复查缺口直接 FAIL 进回跳/升级）——缺失的导出直接报告出来强制修复，不靠 agent 自觉
 
 **3. 一次跑要烧多少 token？**
 - 多 agent 流水线天然烧钱：每次工具调用都是一次 LLM 往返，历史越滚越大。
-- DevForge 的成本工程：批量读取（一次调用读全部文件）、上下文压缩、工具结果缓存、按环节收紧轮次。
+- DevForge 的成本工程：批量读取（一次调用读全部文件）、上下文压缩、工具结果缓存（重复执行/重复读取拦截）、按环节收紧轮次、**阶段级 token 预算统计**（超预算渐进降级），外加全局熔断兜底。
 
 ---
 
@@ -100,25 +101,25 @@ DevForge 的目标：**一句话需求 → 一个跑得起来、测得过、看�
 **3. 怎么约束 agent：最小权限 + 校验 + 上限 + 平台兜底**
 - 不给约束，agent 会失控：coder 跑去跑代码看报错浪费时间、reviewer 反复读文件烧钱、修复声称完成却没改任何文件
 - 四层约束，**能平台校验的绝不依赖 agent 自觉**：
-  - **工具白名单**按角色配置——coder 只读写自己的文件、reviewer 只读、fixer 读写+测试，最小权限
+  - **工具白名单**按角色配置，且是**硬约束**——`execute` 校验当前 agent 的允许工具集，越权调用直接拒绝；并行 coder 按模块文件白名单隔离，**只能写/改自己模块的文件**（平台拦截，不再靠自觉）
   - **结构化输出校验**——审查/设计/质检输出过 JSON schema，非法输出丢弃重出，宁缺毋滥
   - **轮次上限**——每个角色限定工具调用轮数，耗尽强制收尾，防死循环
-  - **平台兜底**——契约缺口 AST 校验（实现与契约不符直接报告）、已读拦截（同一文件不重发内容）、工具结果缓存、幻觉修复警告（声称修了却没改文件 = 失败）
+  - **平台兜底**——契约缺口 AST 校验（编码整合前注入强制修复、质检时复查缺口直接 FAIL 进回跳/升级）、已读拦截（同 agent 同文件不重发内容）、工具结果缓存、幻觉修复警告（声称修了却没改文件 = 失败）
 
-**4. 协作拓扑：阶段串行 + 角色并行 + 质量门禁回跳**
-- **阶段之间串行**（需求 → 设计 → 编码 → 验证 → 文档 → 质检）：顺序依赖，不能乱
+**4. 协作拓扑：阶段串行 + 角色并行 + 质量门禁回跳/升级**
+- **阶段之间串行**（需求 → 设计 → 编码 → 验证 → 质检 → 文档）：顺序依赖，不能乱；拓扑由 `pipeline_spec` 声明式配置，重排/自定义流水线不改代码
 - **阶段之内并行**（coder×N 并行写模块、reviewer×4 并行审查）：提速的关键，4 个 coder 同时写 4 个模块
-- **质量门禁**：质检 FAIL 回跳重修（≤3 次），不达标的项目带失败标记交付；但测试框架类问题（evidence 项）不回跳——修不了环境问题就白烧三轮
-- **用户随时可干预**：阶段边界消费用户消息——已编码的项目走增量迭代，未编码的回退设计重来；修复 diff 送人工审阅，拒绝则带着反馈重修
+- **质量门禁**：质检 FAIL 回跳 Verification 重修（≤3 次）；**同一批缺口第二次 QG 仍存在 → 自动升级回 Design 重新设计**（fixer 修不动 = 架构问题，且质检反馈喂给 CTO），不达标的项目带失败标记交付；测试框架类问题（evidence 项）不回跳——修不了环境问题就白烧三轮
+- **用户随时可干预**：阶段边界消费用户消息——已编码的项目**动态插入 Iterate 阶段走增量迭代**，未编码的回退设计重来；修复 diff 送人工审阅，拒绝则带着反馈重修（迭代被拒也自动重做一次）
 
 **5. 知识沉淀：记忆只存"验证过的"**
 - 失败的经验（半途而废的需求、修不好的 bug）教给下一个项目 = 污染
-- 选择：质检 **PASS 才写入记忆**、FAIL 自动清除、召回侧排除未完成项目；函数记忆三态标记（verified / has-issues / unreviewed——**没查过不等于通过**）
-- 效果：记忆库是跨项目的"已验证知识库"——CTO 召回历史设计方案，coder 召回已验证的函数实现
+- 选择：质检 **PASS / 高分 WARN 才写入记忆**、FAIL 自动清除、召回侧排除未完成项目；函数记忆三态标记（verified / has-issues / unreviewed——**没查过不等于通过**）；修复轮后测试通过才学习**修复模式**（错误签名 → 修复前后对照），fixer 下次遇到同类错误直接参考
+- 效果：记忆库是跨项目的"已验证知识库"——CTO 召回历史设计方案，coder 召回已验证的函数实现，fixer 召回已验证的修复模式
 
 **支撑层**（非协作核心，但决定可用性）：
-- **执行安全** — 生成代码跑在 Docker 沙箱（代理免疫、依赖自动安装），不可用时回退宿主机 + AST 危险代码扫描
-- **成本工程** — 批量读取、上下文压缩、token 熔断：单 run 稳定 60 万 tokens 以内，失败不会无限烧钱
+- **执行安全** — 生成代码跑在 Docker 沙箱（代理免疫、依赖自动安装），不可用时回退宿主机：静态 AST 扫描分级（命令执行/动态代码硬拦截；文件操作按路径分级，项目根内相对路径放行）+ 运行期沙箱 shim（sitecustomize 拦截逃逸项目根/系统临时目录的操作）
+- **成本工程** — 批量读取、上下文压缩、结果缓存、按环节收紧轮次、阶段预算统计 + 全局熔断（默认 500k 预警 / 900k 硬停），失败不会无限烧钱
 
 ---
 
@@ -132,17 +133,17 @@ DevForge 的目标：**一句话需求 → 一个跑得起来、测得过、看�
     ▼
 ① RequirementsDiscussion  PM 澄清需求（提问/headless 直出）
 ② Design                  CTO 模块契约 + CPO 审查（2-4 模块）
-③ Coding                  coder×N 并行写模块 → integrator 对账
-④ Verification            tester 写测试 → reviewer×4 审查
-                          → fixer 修复 → 复测（可循环 2 轮）
-⑤ Documentation           dependency_analyst + technical_writer
-⑥ QualityGate             inspector 判定 PASS/WARN/FAIL
-      FAIL → 回跳 ④（≤3 次）
+③ Coding                  coder×N 并行写模块 → integrator 对账 → tester 写测试
+④ Verification            reviewer×4 审查（含测试证据）→ fixer 修复 → 复测（可循环 2 轮）
+⑤ QualityGate             inspector 判定 PASS/WARN/FAIL（平台契约硬门禁）
+      FAIL → 回跳 ④（≤3 次；同缺口二跳 → 回 ② 重新设计）
+      PASS/WARN → ⑥ 生成文档
+⑥ Documentation           dependency_analyst + technical_writer
     │
     ▼
 交付：WareHouse/<任务>_DevForge_<时间戳>_<run_id>/
       ├── 代码（src/ 布局）   ├── 测试（test_*.py）
-      ├── 文档 + requirements.txt   └── .devforge/（checkpoint/事件）
+      ├── 文档 + requirements.txt   └── .devforge/（checkpoint / 事件 / agent 历史）
 ```
 
 **分层** — 四层分工：
@@ -150,18 +151,18 @@ DevForge 的目标：**一句话需求 → 一个跑得起来、测得过、看�
 | 层 | 职责 |
 |---|---|
 | **前端**（Vue 3 + WebSocket） | 可视化与交互：像素办公室、agent 对话、审查卡片、质检结论、历史回放 |
-| **后端**（FastAPI） | 任务队列（FIFO 单活）→ 流水线编排 → Agent（ReAct + 工具循环）；Blackboard 共享状态，checkpoint 落盘支持断点重跑 |
-| **LLM 与执行** | DeepSeek API + Docker 沙箱（代理免疫、依赖自动安装），不可用回退宿主机 + AST 危险代码扫描 |
-| **记忆**（ChromaDB） | 阶段方案与已验证函数跨项目召回，只收"通过质检"的经验 |
+| **后端**（FastAPI） | 任务队列（FIFO 单活）→ 流水线引擎（`pipeline_spec` 表驱动）→ Agent（ReAct + 工具循环）；Blackboard 共享状态，checkpoint + agent 历史落盘支持断点续跑 |
+| **LLM 与执行** | DeepSeek API + Docker 沙箱（代理免疫、依赖自动安装），不可用回退宿主机 + 静态扫描分级 + 运行期沙箱 shim |
+| **记忆**（ChromaDB） | 阶段方案、已验证函数、修复模式跨项目召回，只收"验证过"的经验 |
 
 **贯穿层** — 支撑多 agent 协作的四个机制：
 
 | 机制 | 职责 |
 |---|---|
-| **事件总线** | 每个 agent 动作都发事件 → WebSocket 实时推前端；per-run seq 保序、关键事件裁剪保护、流式输出合并降噪 |
-| **工具注册表** | 9 个工具按角色白名单注入（coder 只读写、reviewer 只读、fixer 读写+测试）；结果缓存 + 已读拦截，杜绝重复执行和重复读取 |
+| **事件总线** | 每个 agent 动作都发事件 → WebSocket 实时推前端；per-run seq 保序、关键事件裁剪保护、流式输出合并降噪、阶段 token 统计 |
+| **工具注册表** | 10 个工具按角色白名单**硬约束**注入（coder 只读写、reviewer 只读、fixer 读写+测试）；结果缓存 + 已读拦截（per-agent），杜绝重复执行和重复读取 |
 | **Blackboard** | 所有 agent 共享的工作台：需求/模块契约/代码/审查结果/checkpoint，阶段边界落盘 |
-| **记忆** | 跨项目沉淀"验证过"的知识，后续项目自动召回复用 |
+| **记忆** | 跨项目沉淀"验证过"的知识（阶段方案 / 函数实现 / 修复模式），后续项目自动召回复用 |
 
 ---
 
@@ -172,12 +173,14 @@ src/
 ├── core/        # 基础设施：配置 / 日志 / 事件总线 / 文本解析
 ├── codegen/     # 生成核心（DDD 分层）
 │   ├── domain/          # Agent / Phase / Blackboard / 契约 / 端口
-│   ├── application/     # 流水线编排 + 8 个阶段实现
-│   └── infrastructure/  # LLM 客户端 / 工具系统（文件/代码/计划/搜索）
+│   ├── application/     # 流水线引擎（spec 表驱动）+ 各阶段实现
+│   │   ├── spec.py      # 编排 DSL：阶段描述符（重试/预算/质检跳转）
+│   │   └── phases/      # 需求/设计/编码/验证/质检/文档/迭代
+│   └── infrastructure/  # LLM 客户端 / 工具系统（文件/代码/计划/搜索）/ 沙箱 shim
 ├── memory/      # ChromaDB 记忆（domain / infrastructure / 提示格式化）
 └── serving/     # FastAPI + WebSocket 服务（接口 / 任务队列 / 运行状态机）
 web/             # Vue 3 + TS 前端（Dashboard / 像素办公室 / 历史 / 项目详情）
-configs/         # 流水线配置 / 角色定义 / prompt 模板 / JSON schema
+configs/         # 流水线配置（pipeline_spec）/ 角色定义 / prompt 模板 / JSON schema
 scripts/         # 服务启动入口
 ```
 
@@ -235,29 +238,29 @@ cd web && npm run dev
 
 ## 🧰 技术栈
 
-| 层次 | 技术                                                                                   |
-|------|----------------------------------------------------------------------------------------|
-| 后端 | Python 3.10+ · FastAPI · uvicorn · WebSocket                                           |
-| 前端 | Vue 3 · TypeScript · Vite                                                              |
-| LLM | openai SDK（DeepSeek / OpenAI ）                                          |
-| 记忆 | ChromaDB                                                                               |
-| 执行 | Docker 沙箱（python:3.12-slim）· AST 危险代码扫描                                      |
-| 架构 | DDD 分层（domain / application / infrastructure / interfaces） |
-| 质量 | pytest· pytest-cov · ruff · vitest                                         |
-| 依赖 | uv + pyproject.toml + uv.lock                                                          |
+| 层次 | 技术 |
+|------|------|
+| 后端 | Python 3.10+ · FastAPI · uvicorn · WebSocket |
+| 前端 | Vue 3 · TypeScript · Vite |
+| LLM | openai SDK（DeepSeek / OpenAI 兼容） |
+| 记忆 | ChromaDB（阶段方案 / 函数实现 / 修复模式三集合） |
+| 执行 | Docker 沙箱（python:3.12-slim）· 静态扫描分级 + 运行期沙箱 shim（宿主回退） |
+| 架构 | DDD 分层（domain / application / infrastructure / interfaces）· 编排 spec 表驱动 |
+| 质量 | pytest · pytest-cov · ruff · vitest |
+| 依赖 | uv + pyproject.toml + uv.lock |
 
 ---
 
 ## 🗺 未来规划
 
 **近期 — 把流水线跑得更稳**
-- [ ] **修复能力增强** — 让 fixer 学会"改不动就重构"而非死磕同一个文件，减少质检回跳轮次
-- [ ] **测试链路加固** — 契约-实现偏差的自动修复（平台发现缺口后直接生成别名补丁，而不是等 integrator/fixer）
-- [ ] **前端体验** — 阶段时间线、token 实时仪表盘、生成项目在线预览
+- [x] **修复能力增强** — `edit_file` 行级补丁（不再整文件重写）+ 质检**同缺口自动升级重设计**（不再死磕同一个 fixer）
+- [x] **测试链路加固** — 平台 AST 契约硬门禁：质检复查契约缺口直接 FAIL，进回跳/升级通道
+- [ ] **前端体验** — 阶段时间线、token 实时仪表盘（`phase_usage` 事件已就绪）、生成项目在线预览
 
 **中期 — 扩展边界**
 - [ ] **更多语言支持** — 从 Python-only 扩展到 TypeScript/Go（契约系统已语言中立，主要是执行与测试链路的适配）
-- [ ] **记忆质量提升** — 召回排序优化、记忆条目自动合并去重、跨任务知识蒸馏
+- [ ] **记忆质量提升** — 中文语义检索（当前英文嵌入模型 + 关键词兜底，需引入多语言嵌入）、召回排序优化、记忆条目自动合并去重、跨任务知识蒸馏
 - [ ] **评测扩展** — 任务集扩充到 20+、引入人工评分维度、支持并行评测
 
 **远期 — 成为可依赖的 AI 软件开发基础设施**

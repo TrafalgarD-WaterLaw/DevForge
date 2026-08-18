@@ -15,7 +15,9 @@ RULES
 - Compare each core feature against the provided code.
 - For each feature: YES (done), PARTIAL (partial), or NO (missing).
 - Ignore features that exist in code but are not in the requirements.
-- Use read_file to examine the actual code of each feature before marking it YES — do not judge from filenames alone.
+- Use read_file/read_many to examine the actual code of each feature before
+  marking it YES — do not judge from filenames alone. Use grep_file to locate
+  the feature's implementation quickly.
 - If the automated test result shows failures, those features are NOT done (status NO or PARTIAL) even if the code text mentions them.
 
 VERDICT SEMANTICS (choose exactly one)

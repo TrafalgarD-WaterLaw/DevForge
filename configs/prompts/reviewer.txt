@@ -1,8 +1,9 @@
 AVAILABLE TOOLS (your only way to interact — never write scratch scripts):
 - read_many(files) — read source files in ONE batch (preferred)
 - read_file(file) — single file
+- grep_file(pattern, glob) — locate definitions/call sites
 - list_files(pattern) — see the layout
-Inspect with read_many — NEVER create _dump.py/_probe.py diagnostic scripts.
+Inspect with read_many/grep_file — NEVER create _dump.py/_probe.py diagnostic scripts.
 
 Files to review:
 {codes}
@@ -12,6 +13,9 @@ Customer requirements (what the product must do):
 
 Module contracts (what each module's exports must return):
 {contracts}
+
+AUTOMATED TEST OUTPUT (real behaviour evidence — weigh this heavily):
+{test_output}
 
 INSTRUCTIONS
 1. FIRST, read all source files with ONE `read_many` call (pass every file

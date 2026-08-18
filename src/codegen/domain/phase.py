@@ -14,6 +14,8 @@ class Phase:
 
     def __init__(self, blackboard):
         self.blackboard = blackboard
+        # O10: 本阶段创建的 agent（阶段结束归档对话历史用）
+        self._created_agents: list = []
 
     @property
     def codes(self) -> str:
@@ -27,8 +29,35 @@ class Phase:
 
     def agent(self, key: str, *, tag: str = "") -> Agent:
         """Create an Agent. *key* must be declared in this phase's
-        ``roles`` list in phases.json."""
-        return Agent(key, self.blackboard, tag=tag)
+        ``roles`` list in phases.json.
+
+        O10: 同阶段重跑（retry/回跳/断点恢复）时自动恢复磁盘归档的
+        对话历史 —— 重跑的 agent 不再"失忆"（此前只有 system prompt
+        + 新任务消息）。归档只作上下文，文件内容以磁盘为准。"""
+        agent = Agent(key, self.blackboard, tag=tag)
+        hist = self._load_archived_history(agent.name)
+        if hist:
+            agent.restore_history(hist)
+        self._created_agents.append(agent)
+        return agent
+
+    def _load_archived_history(self, agent_name: str) -> dict | None:
+        """读取本阶段该 agent 的历史归档（.devforge/agent_history/<phase>/）。"""
+        try:
+            import os
+            from codegen.application.chat_chain import ARTIFACT_DIR
+            directory = self.blackboard.get("directory", "")
+            if not directory:
+                return None
+            path = os.path.join(
+                directory, ARTIFACT_DIR, "agent_history",
+                type(self).__name__, f"{agent_name}.json")
+            if not os.path.exists(path):
+                return None
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
 
     # ── Prompt rendering ────────────────────────────────
 
@@ -59,10 +88,12 @@ class Phase:
 
     def _load_memories(self, agent_key: str, **extra) -> str:
         """Retrieve relevant memories for *agent_key*.
-        CTO → phase-level summaries.  Coder → function-level source code."""
+        CTO → phase-level summaries.  Coder/Tester → function-level verified
+        implementations.  Fixer → FixPattern 修复模式（错误签名召回）。"""
         try:
             from memory.infrastructure.chroma_store import (
                 MemoryStore,
+                format_fix_memories,
                 format_function_memories,
                 format_memories,
             )
@@ -73,15 +104,33 @@ class Phase:
             store = MemoryStore(
                 chroma_dir=self.blackboard.get("_memory_dir", ""))
 
-            if agent_key == "coder":
-                query = f"{extra.get('module_name', '')} {extra.get('module_desc', '')}"
+            if agent_key in ("coder", "tester"):
+                if agent_key == "coder":
+                    query = f"{extra.get('module_name', '')} {extra.get('module_desc', '')}"
+                else:
+                    # tester：按模块契约/代码内容召回已验证实现（写测试参考）
+                    query = (extra.get("contracts", "") or extra.get("codes", ""))[:200]
                 if not query.strip():
                     return ""
-                _log.info("[Memory] %s recalling...", extra.get('module_name', agent_key))
+                _log.info("[Memory] %s recalling...", agent_key)
                 entries = store.recall_functions(query, n=3)
                 result = format_function_memories(entries)
                 if result:
-                    print(f"  [Memory] → coder '{extra.get('module_name','')}' got {len([e for e in entries if 'verified' in e.get('tags',[])])} verified implementations", flush=True)
+                    print(f"  [Memory] → {agent_key} got verified implementations", flush=True)
+                return result
+
+            if agent_key == "fixer":
+                # M1：修复模式召回 —— query 从测试输出提取错误签名
+                from memory.domain.extract import _extract_error_signature
+                query = _extract_error_signature(
+                    extra.get("test_output", "") or "")
+                if not query:
+                    return ""
+                _log.info("[Memory] fixer recalling fixes for %s...", query)
+                entries = store.recall_fix_patterns(query, n=2)
+                result = format_fix_memories(entries)
+                if result:
+                    print(f"  [Memory] → fixer got {len(entries)} fix patterns", flush=True)
                 return result
 
             if agent_key == "chief_technology_officer":

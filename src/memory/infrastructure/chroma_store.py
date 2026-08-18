@@ -26,6 +26,7 @@ MEMORY_DIR_NAME = ".memory"
 # Collection names
 COL_PHASES = "memories_phases"
 COL_FUNCTIONS = "memories_functions"
+COL_FIXES = "memories_fixes"
 
 # Shared PersistentClient per directory — multiple runs opening the same
 # ChromaDB path concurrently would contend on the SQLite lock.
@@ -86,9 +87,19 @@ class MemoryStore:
             embedding_function=self._embedding_fn,
             metadata={"hnsw:space": "cosine"},
         )
+        # M1: 修复模式（错误签名 → 修复对照），只存验证过的修复
+        self._col_fixes = self._client.get_or_create_collection(
+            name=COL_FIXES,
+            embedding_function=self._embedding_fn,
+            metadata={"hnsw:space": "cosine"},
+        )
 
     def _collection(self, phase: str):
-        return self._col_functions if phase == "Function" else self._col_phases
+        if phase == "Function":
+            return self._col_functions
+        if phase == "FixPattern":
+            return self._col_fixes
+        return self._col_phases
 
     # ── Write ──────────────────────────────────────────
 
@@ -147,15 +158,22 @@ class MemoryStore:
         self._evict_if_over_limit(col)
 
     def _evict_if_over_limit(self, col):
-        """超容量时按时间戳删最旧（默认 阶段 500 / 函数 2000，可配置）。"""
+        """超容量时按时间戳删最旧（默认 阶段 500 / 函数 2000 / 修复 300，
+        可配置）。"""
         try:
             from core.config import load_pipeline_config
             mem_cfg = load_pipeline_config().get("memory", {}) or {}
             max_phases = int(mem_cfg.get("max_phases", 500))
             max_functions = int(mem_cfg.get("max_functions", 2000))
+            max_fixes = int(mem_cfg.get("max_fixes", 300))
         except Exception:
-            max_phases, max_functions = 500, 2000
-        limit = max_phases if col is self._col_phases else max_functions
+            max_phases, max_functions, max_fixes = 500, 2000, 300
+        if col is self._col_phases:
+            limit = max_phases
+        elif col is self._col_fixes:
+            limit = max_fixes
+        else:
+            limit = max_functions
         count = col.count()
         if count <= limit:
             return
@@ -172,21 +190,37 @@ class MemoryStore:
         except Exception:
             _log.exception("Memory eviction failed")
 
+    def write_fix_pattern(self, entry: MemoryEntry):
+        """写入修复模式（M1，phase="FixPattern" → fixes collection）。
+
+        调用方保证"验证过的修复"（修复后测试通过）。"""
+        if entry.phase != "FixPattern":
+            entry.phase = "FixPattern"
+        self.write(entry)
+
+    def recall_fix_patterns(self, query: str, *, n: int = 2) -> list[dict]:
+        """按错误签名召回历史修复模式（fixer 注入用）。"""
+        return self._recall(self._col_fixes, query, n=n)
+
     def write_phase(self, project: str, phase: str, blackboard):
         """Extract a memory from *blackboard* after *phase* completes.
         Phase entries → phases collection.
-        Function entries → functions collection."""
+        Function entries → functions collection.
+
+        M8: Verification 的函数记忆写在第一轮（可能早于 fixer 修复/回跳），
+        QualityGate 阶段用最终代码状态重写 —— 相同 id upsert 覆盖中间态，
+        记忆库里留下的永远是交付时的实现。"""
         entry = extract_phase_entry(project, phase, blackboard)
         if entry:
             self.write(entry)
-        if phase == "Verification":
+        if phase in ("Verification", "QualityGate"):
             for fn_entry in extract_function_entries(project, blackboard):
                 self.write(fn_entry)
 
     def clear(self) -> int:
         """清空全部记忆，返回删除条数。不可恢复。"""
         total = 0
-        for col in (self._col_phases, self._col_functions):
+        for col in (self._col_phases, self._col_functions, self._col_fixes):
             try:
                 ids = col.get(limit=100000)["ids"]
                 if ids:
@@ -198,13 +232,13 @@ class MemoryStore:
         return total
 
     def delete_project(self, project: str) -> int:
-        """删除某项目全部记忆（两个 collection）。
+        """删除某项目全部记忆（全部 collection）。
 
         质检最终未通过时清库 —— 失败的编码/审查经验不应留在记忆里
         （recall 侧虽已排除未完成项目，但写入侧也不能留垃圾）。
         """
         total = 0
-        for col in (self._col_phases, self._col_functions):
+        for col in (self._col_phases, self._col_functions, self._col_fixes):
             try:
                 res = col.delete(where={"project": project})
                 if isinstance(res, list):

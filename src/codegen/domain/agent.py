@@ -3,12 +3,16 @@
 from __future__ import annotations
 import json as _json
 import logging as _logging
+import threading as _threading
 from core.text import parse_llm_output
 from codegen.domain.blackboard import Blackboard
 from codegen.domain.ports import LlmPort
 from codegen.infrastructure.llm_client import LLMClient
 
 _logger = _logging.getLogger(__name__)
+# usage 累加锁：并行 coder 线程同时 _record_usage 时 dict += 是非原子
+# 读改写，会丢 token 计数（前端 token 仪表盘系统性偏低）
+_USAGE_LOCK = _threading.Lock()
 MAX_TOOL_ROUNDS = 16
 # 压缩时旧工具结果截断保留的开头字符数（read_many/run_tests 的结果
 # 是历史膨胀主因，旧结果只需留开头让模型知道"读过什么"）
@@ -104,6 +108,10 @@ class Agent:
         from codegen.infrastructure.tools.registry import runtime
 
         runtime().ctx.blackboard = self.blackboard
+        # 工具白名单硬约束登记：execute 据此拒绝未授权调用（并行 coder
+        # 各以模块名为名登记同一角色工具集）
+        runtime().register_agent(
+            self.name, [t["function"]["name"] for t in self._tool_schemas])
         if json_mode and "json" not in user_msg.lower():
             user_msg = f"{user_msg}\n\nRespond in JSON."
         self._messages.append({"role": "user", "content": user_msg})
@@ -412,16 +420,20 @@ class Agent:
         )
 
     def _record_usage(self, usage: dict | None):
-        """Accumulate token usage per agent into the blackboard."""
+        """Accumulate token usage per agent into the blackboard.
+
+        加锁：并行 coder 线程并发调用时，dict 读改写 += 非原子会丢计数。
+        """
         if not usage or self.blackboard is None:
             return
         log = self.blackboard.setdefault("usage_log", {})
-        entry = log.setdefault(
-            self.name, {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0}
-        )
-        entry["prompt_tokens"] += usage.get("prompt_tokens", 0)
-        entry["completion_tokens"] += usage.get("completion_tokens", 0)
-        entry["calls"] += 1
+        with _USAGE_LOCK:
+            entry = log.setdefault(
+                self.name, {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0}
+            )
+            entry["prompt_tokens"] += usage.get("prompt_tokens", 0)
+            entry["completion_tokens"] += usage.get("completion_tokens", 0)
+            entry["calls"] += 1
 
     def receive(self, llm_response: dict):
         """Convert another agent's output into a readable user message.
@@ -437,7 +449,35 @@ class Agent:
             content = _json.dumps(llm_response, ensure_ascii=False, indent=2)
         self._messages.append({"role": "user", "content": content})
 
-    WRITE_TOOLS = frozenset({"write_file", "todo_write"})
+    # ── O10: 对话历史序列化（checkpoint 归档 / 跨进程恢复）──────
+
+    def serialize_history(self) -> dict:
+        """序列化对话历史（JSON 安全）：供阶段结束归档到磁盘。"""
+        return {
+            "agent": self.name,
+            "messages": _json.loads(
+                _json.dumps(self._messages, ensure_ascii=False)),
+        }
+
+    def restore_history(self, data: dict):
+        """从归档恢复对话历史（同阶段重跑/断点恢复时保留上下文）。
+
+        当前 system prompt（角色提示词）以配置为准保留，只替换归档中的
+        非 system 消息 —— 角色配置升级不影响恢复。工具结果等历史消息
+        只作上下文，文件内容以磁盘为准（已读记录按 run 重建）。
+        """
+        msgs = (data or {}).get("messages") or []
+        if not msgs or not isinstance(msgs, list):
+            return
+        filtered = [
+            m for m in msgs
+            if isinstance(m, dict) and m.get("role") in (
+                "user", "assistant", "tool")
+        ]
+        system = [m for m in self._messages if m.get("role") == "system"]
+        self._messages = system + filtered
+
+    WRITE_TOOLS = frozenset({"write_file", "edit_file", "todo_write"})
 
     def _run_tools(self, tool_calls: list[dict]):
         from concurrent.futures import ThreadPoolExecutor
@@ -474,6 +514,11 @@ class Agent:
 
         def run_one(tc: dict) -> tuple[str, str]:
             set_runtime(rt)
+            # 线程池 worker 不继承调用线程的 contextvar —— 必须在这里
+            # 重新绑定 agent 名，否则读工具（read_file/read_many）里
+            # mark_read 的 `if agent:` 恒为假、已读拦截从不记录
+            # （"重复读"照发全文的根因）；且 per-agent 隔离靠它区分
+            rt.current_agent = self.name
             return (tc["id"], rt.execute(tc["name"], tc.get("args", {})))
 
         readonly = [tc for tc in executed if tc["name"] not in self.WRITE_TOOLS]

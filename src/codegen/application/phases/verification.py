@@ -4,7 +4,7 @@ import difflib
 import json
 import logging
 import os
-from core.config import load_phases_config
+from core.config import load_phases_config, load_pipeline_config
 from core.events import Events, HookRegistry
 from codegen.application.patterns import parallel
 from codegen.application.process import run_process, trim_paths
@@ -65,7 +65,11 @@ def run_project_tests(
                 *cov_args(python, directory),
                 *test_files,
             ]
-            out, err, code = run_process(cmd, cwd, timeout=120)
+            # 宿主机回退同样注入运行期沙箱 shim（T9-A）：文件操作逃逸
+            # 项目根/系统临时目录会被拦截
+            from codegen.infrastructure.sandbox import sandbox_env
+            host_env = {**os.environ, **sandbox_env(directory)}
+            out, err, code = run_process(cmd, cwd, timeout=120, env=host_env)
             output = trim_paths((err + out).decode("utf-8", errors="replace"),
                                 directory)
             if code == 0:
@@ -95,14 +99,16 @@ class Verification(Phase):
     def run(self):
         directory = self.blackboard.get("directory", "")
         lenses = load_phases_config().get("Verification", {}).get("lenses", [])
-        from core.config import load_pipeline_config
-
         rounds = int(load_pipeline_config().get("verification_rounds", 2) or 2)
         for loop in range(1, rounds + 1):
             HookRegistry.trigger("review_round", phase="Verification", loop=loop)
             self._pre_codes = dict(self.blackboard.codes)
-            review_texts, discarded, valid = self._run_review_round(lenses, loop)
+            # 测试先行：reviewer 基于真实行为证据审查。此前测试输出只给
+            # fixer，reviewer 拿不到 —— 审查与测试两条证据链脱节，审查员
+            # 重复发现 tester 已报告的问题。同一份输出也喂给 fixer。
             has_bugs, test_output, infra_failed = self._run_tests()
+            review_texts, discarded, valid = self._run_review_round(
+                lenses, loop, test_output)
             # 测试基础设施失败（pytest 装不上/入口也跑不通）≠ 项目 bug：
             # 没有 review 意见时不再为此单开 fix 轮（fixer 修不了环境问题）
             if (not has_bugs or infra_failed) \
@@ -114,7 +120,9 @@ class Verification(Phase):
                 loop=loop,
             )
 
-    def _run_review_round(self, lenses: list, loop: int) -> tuple[list[str], int, int]:
+    def _run_review_round(
+        self, lenses: list, loop: int, test_output: str = ""
+    ) -> tuple[list[str], int, int]:
         """多 lens 并行审查 + schema 校验重试。返回
         (review_texts, discarded, valid)。"""
         review_texts = []
@@ -131,11 +139,11 @@ class Verification(Phase):
         for l in lenses:
             agent = self.agent("reviewer", tag=f"{l['name']}Reviewer")
             if loop > 1:
-                agent._max_tool_rounds = min(agent._max_tool_rounds, 3)
+                self._cap_tool_rounds(agent, 3)
             tasks.append(
                 (
                     agent,
-                    f"Focus: {l['focus']}\n\n{self.prompt('reviewer', codes=self.files, requirements=requirements, contracts=contracts)}",
+                    f"Focus: {l['focus']}\n\n{self.prompt('reviewer', codes=self.files, requirements=requirements, contracts=contracts, test_output=(test_output or '(no tests run)')[:1500])}",
                     True,
                 )
             )
@@ -212,7 +220,7 @@ class Verification(Phase):
         # 第二轮修复范围小（reviewer 只报了遗漏项），8 轮全量修复
         # 是浪费 —— 限 6 轮
         if loop > 1:
-            fixer._max_tool_rounds = min(fixer._max_tool_rounds, 6)
+            self._cap_tool_rounds(fixer, 6)
         fixer_note = (
             f"\nNOTE: {discarded} of the review outputs were invalid and discarded — double-check the code yourself for bugs."
             if discarded
@@ -224,6 +232,10 @@ class Verification(Phase):
         tester_report = self.blackboard.get("tester_report", "")
         # 上一轮 fixer 未改动任何文件 → 明确警告（防"幻觉修复"循环）
         no_change = self.blackboard.get("fixer_no_change", "")
+        # 上一轮平台契约复查发现的缺口（审查-修复闭环）→ 本轮必须补齐
+        pending_gaps = self.blackboard.get("contract_gaps", "")
+        if pending_gaps:
+            self.blackboard["contract_gaps"] = ""
         fixer.react(
             self.prompt(
                 "fixer",
@@ -231,6 +243,7 @@ class Verification(Phase):
                 reviews=(all_reviews or "No review issues.") + fixer_note,
                 test_output=test_output
                 + qg_feedback
+                + pending_gaps
                 + (f"\nTESTER REPORT:\n{tester_report}" if tester_report else "")
                 + (f"\n{no_change}" if no_change else "")
                 + (
@@ -242,10 +255,48 @@ class Verification(Phase):
         if not directory:
             return
         self.blackboard.reload_codes(directory)
+        # 审查-修复闭环：修复后平台重跑 AST 契约检查。缺口仍在 →
+        # 记录给下一轮 fixer（审查员报过的契约缺口必须真的补上，
+        # 不能"文件改动了就算修好"）
+        try:
+            from codegen.application.phases.coding import contract_gap_text
+            gaps = contract_gap_text(directory,
+                                     self.blackboard.get("modules", []))
+            if gaps and loop < int(load_pipeline_config().get(
+                    "verification_rounds", 2) or 2):
+                self.blackboard["contract_gaps"] = (
+                    gaps.replace("PLATFORM CONTRACT CHECK — the following "
+                                 "exports are declared in the design but "
+                                 "MISSING from the source.",
+                                 "PLATFORM RE-CHECK — these exports were "
+                                 "STILL missing after your last fix:")
+                )
+        except Exception:
+            _log.exception("Contract gap re-check failed")
         fixed_bugs, _, _infra = self._run_tests()
         changed = [
             f for f, c in self.blackboard.codes.items() if self._pre_codes.get(f) != c
         ]
+        # M1 learn_fix_pattern：修复成功（测试通过）且实际改了文件 →
+        # 提取错误签名 + 修复对照入库（只存"验证过的修复"）。写失败
+        # 不影响交付（记忆是增强不是依赖）。
+        if changed and not fixed_bugs:
+            try:
+                from memory.domain.extract import extract_fix_pattern
+                from memory.infrastructure.chroma_store import MemoryStore
+                project = (os.path.basename(directory)
+                           .split("_DevForge_", 1)[0])[:80] if directory else ""
+                entry = extract_fix_pattern(
+                    project or "?",
+                    self._pre_codes, dict(self.blackboard.codes),
+                    test_output)
+                if entry:
+                    MemoryStore(
+                        chroma_dir=self.blackboard.get("_memory_dir", "")
+                    ).write_fix_pattern(entry)
+                    print(f"  [Memory] +fix {entry.summary[:60]}", flush=True)
+            except Exception:
+                _log.exception("Failed to learn fix pattern")
         if review_texts or has_bugs or discarded:
             if changed:
                 msg = f"修复完成: {len(changed)} 个文件，等待你审阅"
@@ -350,6 +401,15 @@ class Verification(Phase):
             self._run_process,
             entry_point=self.blackboard.get("entry_point", ""),
         )
+
+    @staticmethod
+    def _cap_tool_rounds(agent, cap: int):
+        """限制 agent 的工具轮次上限（≤cap）。防御式访问：
+        `_max_tool_rounds` 是 Agent 私有属性，测试用鸭子类型 fake 时
+        不存在 —— 不应让阶段代码因缺属性崩溃。"""
+        cur = getattr(agent, "_max_tool_rounds", None)
+        if cur is not None:
+            agent._max_tool_rounds = min(int(cur), cap)
 
     @staticmethod
     def _run_process(cmd, cwd, timeout: int):

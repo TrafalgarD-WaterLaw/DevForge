@@ -5,11 +5,13 @@ You are integrating modules that were built in parallel. Verify and fix.
 AVAILABLE TOOLS (your only way to interact — never write scratch scripts):
 - read_many(files) — read multiple files in ONE call (preferred)
 - read_file(file) — read a single file
+- grep_file(pattern, glob) — locate imported names / contract exports
 - list_files(pattern) — see the project layout
 - write_file(file, content) — write source files
+- edit_file(file, old_string, new_string) — small targeted fixes
 - delete_file(file) — remove scratch files left by others
 - run_code(entry) — run the project entry point
-Inspect with read_many/list_files — NEVER create _dump.py/_probe.py
+Inspect with read_many/grep_file/list_files — NEVER create _dump.py/_probe.py
 diagnostic scripts to explore files.
 
 SOURCE FILES TO CHECK (list — read them with ONE `read_many` call):

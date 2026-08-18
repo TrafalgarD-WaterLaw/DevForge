@@ -20,6 +20,7 @@ _KNOWN_PIPELINE_KEYS = {
     "ask_choice_timeout", "review_timeout", "pm",
     "quality_gate_max_loops", "verification_rounds",
     "quality_gate_min_coverage", "auth_token", "memory",
+    "phase_budget", "pipeline_spec",
 }
 _KNOWN_LLM_KEYS = {
     "model", "base_url", "api_key", "max_retries", "max_tokens",

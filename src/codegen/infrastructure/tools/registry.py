@@ -226,7 +226,7 @@ def cov_args(python: str, project_dir: str = "") -> list[str]:
 # run_tests/run_code 缓存直接消灭"同一 entry 反复跑"的重复执行
 # （docker 每次 20-40s + 结果重复进历史 ≈ tester 23 次调用的冗余大头）
 CACHEABLE_TOOLS = frozenset(
-    {"read_file", "read_many", "run_tests", "run_code"})
+    {"read_file", "read_many", "run_tests", "run_code", "grep_file"})
 
 def _args_key(arguments: dict) -> str:
     """Deterministic key for tool arguments (dict → canonical string)."""
@@ -252,6 +252,10 @@ class ToolRuntime:
     # 这里记住"本轮读过什么"，重复读返回提示而不是重发内容。
     # 必须 per-agent：不同 agent 的对话历史互不可见，A 读过的 B 读是正常的。
     _read_files: dict[str, set[str]] = field(default_factory=dict)
+    # agent tag → 该角色的工具白名单（硬约束）。Agent._react_inner 登记；
+    # execute 校验当前 agent 的调用，未授权工具直接拒绝 —— 白名单不再是
+    # "只给 LLM 看 schema"的软限制。未登记的 agent（单元测试直调）不限制。
+    _agent_tools: dict[str, frozenset[str]] = field(default_factory=dict)
     # 正在执行工具的 agent 名（todo_write 事件归属用）。
     # ContextVar：并行 coder 共享同一 runtime，普通字段会被别的线程
     # 在"赋值→执行"之间改写，todo 事件归属错乱→ 线程隔离
@@ -287,13 +291,28 @@ class ToolRuntime:
         for s in self._read_files.values():
             s.discard(path)
 
+    # ── 工具白名单（硬约束）────────────────────────────
+
+    def register_agent(self, name: str, tools: list[str]) -> None:
+        """登记 agent 允许的工具集（Agent._react_inner 调用）。
+        并行 coder 各以模块名为名，登记同一 "coder" 角色工具集。"""
+        if name:
+            self._agent_tools[name] = frozenset(tools)
+
     def execute(self, name: str, arguments: dict) -> str:
         """Execute a tool by name, return its result as a string."""
         tool = _registry.tools.get(name)
         if tool is None:
             return f"Error: unknown tool '{name}'"
+        # 硬约束：白名单不再是"只给 LLM 看 schema"的软限制 —— 当前 agent
+        # 调用未授权工具直接拒绝（并行 coder 不能越权调 run_code 等）
+        agent = self.current_agent
+        allowed = self._agent_tools.get(agent)
+        if allowed is not None and name not in allowed:
+            return (f"Error: tool '{name}' is not allowed for agent "
+                    f"'{agent or '?'}'.")
         # 写文件会改变 read_file 的结果 — 写后清缓存，避免读到旧内容
-        if name == "write_file":
+        if name in ("write_file", "edit_file"):
             self._cache.clear()
         key = (name, _args_key(arguments))
         if name in CACHEABLE_TOOLS:
@@ -308,11 +327,16 @@ class ToolRuntime:
             _log.warning("Tool '%s' failed: %s", name, e)
             return f"ToolError: {e}"
         # 统一截断：大文件/长输出原样回填 LLM 会爆上下文、烧 token。
+        # 保留头尾（头部 40% + 尾部 60%）：pytest 失败断言/错误信息在
+        # 输出末尾，此前只留头部会把真正错误砍掉（fixer 拿不到关键行）。
         # 截断点在这里 → 事件预览（[:500]）与 LLM 回填一致。
         if len(result) > MAX_TOOL_RESULT_CHARS:
-            result = (result[:MAX_TOOL_RESULT_CHARS]
-                      + f"\n…(输出过长，已截断 {len(result)} → "
-                      f"{MAX_TOOL_RESULT_CHARS} 字符)")
+            head_chars = int(MAX_TOOL_RESULT_CHARS * 0.4)
+            tail_chars = MAX_TOOL_RESULT_CHARS - head_chars
+            marker = (f"\n…(输出过长，已截断 {len(result)} → "
+                      f"{MAX_TOOL_RESULT_CHARS} 字符，保留开头 {head_chars}"
+                      f" + 结尾 {tail_chars})\n")
+            result = result[:head_chars] + marker + result[-tail_chars:]
         if name in CACHEABLE_TOOLS:
             import time as _time
             self._cache[key] = (_time.time(), result)

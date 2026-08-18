@@ -3,10 +3,12 @@ You are writing unit tests for a just-built project.
 AVAILABLE TOOLS (your only way to interact — never write scratch scripts):
 - read_many(files) — read files in ONE batch (preferred over read_file)
 - read_file(file) — single file
+- grep_file(pattern, glob) — locate exports / function signatures
+- list_files(pattern) — see the project layout
 - write_file(file, content) — write test files
 - run_tests(entry) — run pytest (your verification tool)
 - run_code(entry) — run the project entry (NOT test files)
-Inspect with read_many/list_files — NEVER create _dump.py/_probe.py
+Inspect with read_many/list_files/grep_file — NEVER create _dump.py/_probe.py
 diagnostic scripts to explore files.
 
 Language: {language}
@@ -15,6 +17,8 @@ Module contracts (what each module promises to export):
 
 Code files:
 {codes}
+
+{memories}
 
 WORKFLOW
 0. YOUR PRIMARY TASK is writing test files — you are NOT done until every

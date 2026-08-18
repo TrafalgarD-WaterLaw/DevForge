@@ -1,9 +1,14 @@
 """Code execution tools."""
+import ast
 import os
 import shlex
 import subprocess
 
 from codegen.infrastructure.tools.registry import register, runtime
+
+# Windows 无控制台父进程（服务/重定向）spawn 子进程时不弹新窗口
+_NO_WINDOW_FLAG = (getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                   if os.name == "nt" else 0)
 
 # 传入容器的代理变量名：宿主机代理地址（如 127.0.0.1:7897）在容器内
 # 指向容器自己，pip/网络全部失败 —— docker 模式下必须剔除
@@ -59,10 +64,14 @@ def run_code(entry: str = "main.py") -> str:
         else:
             blocked = _scan_dangerous_code(project_dir)
             if blocked:
-                return (f"Execution refused: the project contains dangerous "
-                        f"operations blocked outside the sandbox:\n"
+                # T9-C：拒绝时说明原因与替代方案（docker 是真正的隔离边界）
+                return (f"Execution refused: the project contains operations "
+                        f"blocked outside the sandbox:\n"
                         f"{chr(10).join(blocked)}\n"
-                        "Run with tools.sandbox=docker (isolated) instead.")
+                        "Filesystem changes are only allowed inside the "
+                        "project directory (and system temp). Projects that "
+                        "operate on arbitrary user paths (file organizers, "
+                        "etc.) require tools.sandbox=docker (isolated).")
             cmd = [python, entry]
         result = subprocess.run(
             cmd, cwd=project_dir,
@@ -70,8 +79,9 @@ def run_code(entry: str = "main.py") -> str:
             encoding="utf-8", errors="replace",
             # stdin 置空：生成的 CLI 若读 stdin，立即 EOF 返回而不是阻塞 30s
             stdin=subprocess.DEVNULL,
-            env=_sandbox_env() if script else {**os.environ,
-                                                "PYTHONIOENCODING": "utf-8"},
+            creationflags=_NO_WINDOW_FLAG,
+            env=_sandbox_env() if script
+            else _host_run_env(project_dir),
         )
         if result.returncode != 0:
             raise RuntimeError(result.stderr or f"exit code {result.returncode}")
@@ -80,6 +90,13 @@ def run_code(entry: str = "main.py") -> str:
         return "Execution failed: timed out after 30s"
     except Exception as e:
         return f"Execution failed: {e}"
+
+def _host_run_env(project_dir: str) -> dict:
+    """宿主机执行的子进程环境：PYTHONIOENCODING + 运行期沙箱 shim
+    （T9-A：sitecustomize 拦截逃逸项目根的文件操作）。"""
+    from codegen.infrastructure.sandbox import sandbox_env
+    return {**os.environ, "PYTHONIOENCODING": "utf-8",
+            **sandbox_env(project_dir)}
 
 def _docker_run_script(entry: str, *, install_deps: bool) -> str:
     """容器内执行脚本：先补装依赖（镜像无宿主机 venv 的包），再跑入口。
@@ -94,11 +111,46 @@ def _docker_run_script(entry: str, *, install_deps: bool) -> str:
     lines.append(f"python {shlex.quote(entry)}")
     return "; ".join(lines)
 
+def _static_path_kind(arg) -> str:
+    """路径参数静态分类（T9-B）：
+
+    - ``safe_rel``  — 字面量相对路径且不含 ``..``（解析后落在项目根内，
+      运行期 shim 兜底边界）
+    - ``unsafe``    — 绝对路径或含 ``..``（必然逃逸项目根）
+    - ``unknown``   — 变量/表达式/缺失（无法静态确认）
+    """
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        p = arg.value
+        parts = p.replace("\\", "/").split("/")
+        if os.path.isabs(p) or ".." in parts:
+            return "unsafe"
+        return "safe_rel"
+    return "unknown"
+
+
+def _call_path_args(node, full: str) -> list:
+    """返回调用中可能表示文件路径的参数节点（含 Path('x').unlink() 接收者）。"""
+    candidates: list = list(node.args)
+    for kw in node.keywords:
+        if kw.arg in ("path", "name", "src", "dst", "target",
+                      "source", "directory"):
+            candidates.append(kw.value)
+    base = node.func.value if isinstance(node.func, ast.Attribute) else None
+    if isinstance(base, ast.Call) and isinstance(base.func, ast.Name) \
+            and base.func.id == "Path" and base.args:
+        candidates.append(base.args[0])
+    return candidates
+
+
 def _scan_dangerous_code(directory: str) -> list[str]:
     """宿主机直跑前的静态安全检查：AST 扫描项目 .py 找危险操作。
 
     返回命中列表（空 = 安全）。docker 沙箱内不调用 —— 容器只读挂载
     + 内联文件系统，删文件/跑命令出不了容器。
+
+    分级（T9-B）：命令执行 / 动态代码 / shell=True 一律拒绝（无安全变体）；
+    文件删除/移动类按路径参数分级 —— 项目根内字面量相对路径放行（运行期
+    shim 兜底），绝对路径/../ 或变量参数拒绝并说明原因。
     """
     import ast
     from pathlib import Path
@@ -150,8 +202,17 @@ def _scan_dangerous_code(directory: str) -> list[str]:
                                     f"危险操作 {full or name} (line {node.lineno})")
                     continue
                 if full in _DELETE_CALLS:
-                    findings.append(f"{path.relative_to(directory)}: "
-                                    f"删除/移动文件 {full} (line {node.lineno})")
+                    # 路径分级：全部参数都是项目根内字面量相对路径 → 放行
+                    kinds = [_static_path_kind(a)
+                             for a in _call_path_args(node, full)]
+                    if kinds and all(k == "safe_rel" for k in kinds):
+                        continue
+                    reason = ("路径非项目根内字面量相对路径（绝对路径/../"
+                              "或变量参数，无法静态确认安全）" if kinds
+                              else "无法定位路径参数")
+                    findings.append(
+                        f"{path.relative_to(directory)}: 文件操作 {full} "
+                        f"(line {node.lineno}) — {reason}，宿主直跑拒绝")
                     continue
                 # subprocess 系仅当 shell=True 或 shell 字符串含危险命令时拦截
                 # （纯列表参数是安全的，测试代码常用）
@@ -230,10 +291,13 @@ def run_tests(entry: str = "") -> str:
                                "and automatic install failed.")
         blocked = _scan_dangerous_code(project_dir)
         if blocked:
-            return (f"Execution refused: the project contains dangerous "
-                    f"operations blocked outside the sandbox:\n"
+            return (f"Execution refused: the project contains operations "
+                    f"blocked outside the sandbox:\n"
                     f"{chr(10).join(blocked)}\n"
-                    "Run with tools.sandbox=docker (isolated) instead.")
+                    "Filesystem changes are only allowed inside the "
+                    "project directory (and system temp). Projects that "
+                    "operate on arbitrary user paths (file organizers, "
+                    "etc.) require tools.sandbox=docker (isolated).")
         cmd = [python, "-m", "pytest", "-q", "--no-header", *test_files]
     try:
         result = subprocess.run(
@@ -241,8 +305,8 @@ def run_tests(entry: str = "") -> str:
             capture_output=True, text=True, timeout=120,
             encoding="utf-8", errors="replace",
             stdin=subprocess.DEVNULL,
-            env=_sandbox_env() if script else {**os.environ,
-                                                "PYTHONIOENCODING": "utf-8"},
+            creationflags=_NO_WINDOW_FLAG,
+            env=_sandbox_env() if script else _host_run_env(project_dir),
         )
     except subprocess.TimeoutExpired:
         return "Execution failed: timed out after 120s"

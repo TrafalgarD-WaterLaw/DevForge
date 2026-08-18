@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import sys
+from core.config import load_sys_message
 from core.events import Events, HookRegistry
 from codegen.application.patterns import parallel
 from codegen.domain.phase import Phase
@@ -56,6 +57,49 @@ def _is_collection_error(output: str) -> bool:
         "errors during collection", "collection failed",
         "collected 0 items",
     ))
+
+def contract_gap_check(directory: str, modules: list) -> list[str]:
+    """平台级契约检查：AST 对比契约 exports vs 源码实际导出，返回缺口清单。
+
+    模块级共享函数（Coding 整合前 + Verification 修复轮后都要用）：
+    coder 在并行开发中反复改契约名 —— integrator 靠自觉检查不可靠，
+    这里平台先做硬检查：契约声明但源码未定义的导出生成缺口清单。
+    """
+    if not directory:
+        return []
+    gaps: list[str] = []
+    for mod in modules:
+        name = mod.get("name", "")
+        files = [f for f in (mod.get("files") or []) if isinstance(f, str)] \
+            or [f"{name or 'main'}.py"]
+        src_text = ""
+        for f in files:
+            p = os.path.join(directory, f)
+            if os.path.exists(p):
+                try:
+                    src_text += open(p, encoding="utf-8",
+                                     errors="replace").read()
+                except OSError:
+                    pass
+        defined = set(re.findall(r"^\s*def\s+(\w+)", src_text, re.MULTILINE))
+        defined |= set(re.findall(r"^\s*class\s+(\w+)", src_text,
+                                  re.MULTILINE))
+        for e in mod.get("exports", []):
+            en = e.get("name", "")
+            if en and en not in defined:
+                gaps.append(f"- {name}.{en} 契约声明但源码未定义")
+    return gaps
+
+def contract_gap_text(directory: str, modules: list) -> str:
+    """契约缺口 → 注入 agent prompt 的文本（无缺口返回 ""）。"""
+    gaps = contract_gap_check(directory, modules)
+    if not gaps:
+        return ""
+    return ("\nPLATFORM CONTRACT CHECK — the following exports are "
+            "declared in the design but MISSING from the source. "
+            "Implement them now (as `def <name>(...)` or an alias "
+            "`<name> = <existing>`):\n"
+            + "\n".join(gaps) + "\n")
 
 @register_phase
 class Coding(Phase):
@@ -113,43 +157,17 @@ class Coding(Phase):
         return "\n".join(lines)
 
     def _contract_gap_check(self, modules: list) -> str:
-        """平台级契约检查：AST 对比契约 exports vs 源码实际导出。
+        """平台级契约检查（薄封装 → contract_gap_text 共享函数）。
 
         coder 在并行开发中反复改契约名（execute_moves→apply_move_plan、
         scan_files→discover_files 已出现 3 次）—— integrator 靠自觉
         检查不可靠，这里平台先做硬检查：契约声明但源码未定义的导出
         生成缺口清单，注入 integrator prompt 强制修复（加别名即可）。
-        返回注入文本（无缺口返回 ""）。
+        返回注入文本（无缺口返回 ""）。Verification 修复轮后复用同一
+        检查做闭环（见 verification._run_fix_round）。
         """
-        directory = self.blackboard.get("directory", "")
-        if not directory:
-            return ""
-        gaps: list[str] = []
-        for mod in modules:
-            name = mod.get("name", "")
-            src_text = ""
-            for f in self._module_files(mod):
-                p = os.path.join(directory, f)
-                if os.path.exists(p):
-                    try:
-                        src_text += open(p, encoding="utf-8",
-                                         errors="replace").read()
-                    except OSError:
-                        pass
-            defined = set(re.findall(r"^\s*def\s+(\w+)", src_text, re.MULTILINE))
-            defined |= set(re.findall(r"^\s*class\s+(\w+)", src_text,
-                                      re.MULTILINE))
-            for e in mod.get("exports", []):
-                en = e.get("name", "")
-                if en and en not in defined:
-                    gaps.append(f"- {name}.{en} 契约声明但源码未定义")
-        if not gaps:
-            return ""
-        return ("\nPLATFORM CONTRACT CHECK — the following exports are "
-                "declared in the design but MISSING from the source. "
-                "Implement them now (as `def <name>(...)` or an alias "
-                "`<name> = <existing>`):\n"
-                + "\n".join(gaps) + "\n")
+        return contract_gap_text(
+            self.blackboard.get("directory", ""), modules)
 
     def _filter_pending_modules(self, modules: list, directory: str) -> list:
         """B2 产物缓存：重跑（start_from）时已落盘的模块跳过重新生成。
@@ -351,7 +369,9 @@ class Coding(Phase):
         )
         if not has_tests and tester_report:
             print("  [Tester] 未产出任何测试文件 — 重试 1 次", flush=True)
-            tester._max_tool_rounds = min(tester._max_tool_rounds, 6)
+            cur = getattr(tester, "_max_tool_rounds", None)
+            if cur is not None:
+                tester._max_tool_rounds = min(int(cur), 6)
             tester_report = self._tester_react_result(
                 tester,
                 load_sys_message("tester_no_tests_retry"),
@@ -387,7 +407,9 @@ class Coding(Phase):
                 from core.config import load_sys_message
                 # 反馈轮限 5 轮：修测试 + 复测足够（之前 12 轮跑满，
                 # 反馈轮 10 次调用 ≈ 10 万 tokens 白烧）
-                tester._max_tool_rounds = min(tester._max_tool_rounds, 5)
+                cur = getattr(tester, "_max_tool_rounds", None)
+                if cur is not None:
+                    tester._max_tool_rounds = min(int(cur), 5)
                 tester_report = self._tester_react_result(
                     tester,
                     load_sys_message(

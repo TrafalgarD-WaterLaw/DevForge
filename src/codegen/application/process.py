@@ -8,10 +8,11 @@ import signal
 import subprocess
 
 
-def run_process(cmd, cwd, timeout):
+def run_process(cmd, cwd, timeout, env=None):
     """Run *cmd*, kill on timeout, return (stdout, stderr, returncode).
 
     Windows 下用 CTRL_BREAK（终止子进程树），POSIX 下 killpg。
+    *env* — 可选的环境覆盖（宿主机回退模式注入沙箱 shim）。
     """
     try:
         process = subprocess.Popen(
@@ -20,10 +21,12 @@ def run_process(cmd, cwd, timeout):
             stderr=subprocess.PIPE,
             cwd=cwd,
             stdin=subprocess.DEVNULL,
+            env=env,
             start_new_session=os.name != "nt",
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
-            if os.name == "nt"
-            else 0,
+            creationflags=(
+                subprocess.CREATE_NEW_PROCESS_GROUP
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            ) if os.name == "nt" else 0,
         )
         try:
             return (*process.communicate(timeout=timeout), process.returncode)

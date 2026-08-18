@@ -56,3 +56,25 @@ def format_function_memories(entries: list[dict], max_chars: int = 1200) -> str:
     if not blocks:
         return ""
     return header + "\n" + "\n".join(blocks)
+
+
+def format_fix_memories(entries: list[dict], max_chars: int = 600) -> str:
+    """Format FixPattern recall for Fixer prompt injection (M1).
+
+    只注入"验证过的修复"对照，并明确标注仅供参考、勿直接复制。
+    """
+    if not entries:
+        return ""
+    header = ("--- PROVEN FIX PATTERNS (past projects fixed the SAME error — "
+              "reference the approach, do NOT copy code blindly) ---")
+    blocks: list[str] = []
+    used = len(header)
+    for e in entries:
+        block = f"### {e['summary']}\n{e['detail'][:400]}"
+        if used + len(block) > max_chars:
+            break
+        blocks.append(block)
+        used += len(block)
+    if not blocks:
+        return ""
+    return header + "\n" + "\n".join(blocks)

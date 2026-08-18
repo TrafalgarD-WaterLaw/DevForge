@@ -40,7 +40,9 @@
      "read_many",
      "write_file",
      "todo_write",
-     "list_files"
+     "list_files",
+     "edit_file",
+     "grep_file"
     ],
     "max_tool_rounds": 10,
     "prompt": "prompts/coder.txt"
@@ -52,7 +54,9 @@
      "write_file",
      "run_code",
      "list_files",
-     "delete_file"
+     "delete_file",
+     "edit_file",
+     "grep_file"
     ],
     "max_tool_rounds": 10,
     "prompt": "prompts/integrator.txt"
@@ -64,7 +68,8 @@
      "write_file",
      "run_code",
      "run_tests",
-     "todo_write"
+     "todo_write",
+     "list_files"
     ],
     "max_tool_rounds": 8,
     "prompt": "prompts/tester.txt"
@@ -91,7 +96,7 @@
    },
    {
     "name": "Correctness",
-    "focus": "Verify the implementation matches the expected behaviour. Check that functions return correct values, edge cases are handled, and module contracts are fulfilled. Run the code and inspect inputs/outputs if needed. Report file name and line number for any behavioural defects."
+    "focus": "Verify the implementation matches the expected behaviour. Check that functions return correct values, edge cases are handled, and module contracts are fulfilled. Trace inputs/outputs through the code and compare against the contracts — you cannot run code, so verify by reading carefully. Report file name and line number for any behavioural defects."
    }
   ],
   "agents": {
@@ -99,7 +104,8 @@
     "tools": [
      "read_file",
      "read_many",
-     "list_files"
+     "list_files",
+     "grep_file"
     ],
     "max_tool_rounds": 5,
     "prompt": "prompts/reviewer.txt",
@@ -113,7 +119,9 @@
      "run_code",
      "run_tests",
      "todo_write",
-     "delete_file"
+     "delete_file",
+     "edit_file",
+     "grep_file"
     ],
     "max_tool_rounds": 8,
     "prompt": "prompts/fixer.txt"
@@ -146,7 +154,9 @@
     "tools": [
      "read_file",
      "list_files",
-     "run_code"
+     "run_code",
+     "read_many",
+     "grep_file"
     ],
     "prompt": "prompts/inspector.txt",
     "schema": "schemas/inspector.json"
@@ -167,7 +177,9 @@
      "run_tests",
      "todo_write",
      "list_files",
-     "delete_file"
+     "delete_file",
+     "edit_file",
+     "grep_file"
     ],
     "prompt": "prompts/iteration_engineer.txt"
    }

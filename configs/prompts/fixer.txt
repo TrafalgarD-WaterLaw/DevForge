@@ -3,11 +3,14 @@ You need to fix a module based on review feedback and test results.
 AVAILABLE TOOLS (your only way to interact — never write scratch scripts):
 - read_many(files) — read files in ONE batch (preferred)
 - read_file(file) — single file
-- write_file(file, content) — apply fixes
+- grep_file(pattern, glob) — locate the exact lines to fix
+- edit_file(file, old_string, new_string) — apply SMALL fixes: replace one
+  exact text occurrence (preferred over rewriting the whole file)
+- write_file(file, content) — apply fixes / full-file rewrites
 - delete_file(file) — remove scratch files
 - run_code(entry) — verify the entry point
 - run_tests(entry) — verify with pytest
-Inspect with read_many — NEVER create _dump.py/_probe.py diagnostic scripts.
+Inspect with read_many/grep_file — NEVER create _dump.py/_probe.py diagnostic scripts.
 
 PROJECT FILES:
 {codes}
@@ -18,6 +21,8 @@ REVIEW FEEDBACK:
 TEST OUTPUT:
 {test_output}
 
+{memories}
+
 WORKFLOW
 1. TEST FAILURES FIRST (T2): failing tests define the expected behaviour —
    run `run_tests`, read the failing assertions, and fix the SOURCE code to
@@ -26,9 +31,11 @@ WORKFLOW
 3. Read the files you must fix with ONE `read_many` call (batch all files
    into a single list — one round-trip). Do NOT call read_file repeatedly.
    Then plan the fixes BEFORE calling tools — each tool call is an LLM
-   round-trip. Batch: ONE read_many → ALL write_file fixes → ONE run_tests.
+   round-trip. Batch: ONE read_many → ALL edit_file/write_file fixes →
+   ONE run_tests.
    Do NOT re-read files you have already seen (they have not changed).
-4. Use `write_file` to overwrite corrected files (one per call).
+4. Use `edit_file` for small targeted changes (one exact text replacement
+   per call) — only fall back to `write_file` for large rewrites.
 5. Run the module with `run_code`, then `run_tests` to confirm every fix.
 6. If it still fails, repeat (max 3 fix cycles).
 7. Use `todo_write` to track progress.

@@ -11,5 +11,6 @@
   "agent_tool_rounds_exhausted": "You have used all your tool-call rounds. Output your final answer now — do not call tools again.",
   "agent_context_compacted": "[上下文已压缩：丢弃 {dropped} 条早期消息。继续基于最近的内容工作，不要假设被省略的部分。]",
   "iteration_engineer_regression": "Your changes broke the regression tests — the project's existing test suite now fails:\n{output}\n\nFix the SOURCE CODE so the failing tests pass again. Do NOT modify test files and do NOT weaken assertions — the tests define the expected behaviour. Re-run run_tests to confirm. You have ONE chance; remaining failures will be reported to the user.",
+  "iteration_engineer_rejected": "The user REJECTED your previous iteration with this feedback:\n{feedback}\n\nRework the change to address their concerns. Keep changes minimal — do NOT rewrite unrelated modules. Re-run run_tests to confirm nothing regressed.",
   "tester_no_tests_retry": "You have NOT written any test_*.py files yet — the project has no tests on disk. Do it now: for EACH module, write `test_<module>.py` in the project root covering its exported functions (the contracts and source are in your conversation above). Then run_tests to verify. Do NOT stop until every module has a test file."
 }
