@@ -5,7 +5,7 @@
 **一句话需求 → 虚拟软件公司协作（PM/CTO/程序员/审查员/质检）→ 可运行的项目**
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
-[![tests: 260 passed](https://img.shields.io/badge/tests-260%20passed-green)]()
+[![tests: 298 passed](https://img.shields.io/badge/tests-298%20passed-green)]()
 [![Vue 3](https://img.shields.io/badge/frontend-Vue%203-42b883)]()
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-green)](LICENSE)
 
@@ -28,6 +28,7 @@
   - [运行](#-运行)
   - [提交任务](#-提交任务)
 - [技术栈](#-技术栈)
+- [实测数据](#-实测数据)
 - [未来规划](#-未来规划)
 - [免责声明与许可](#-免责声明与许可)
 
@@ -114,7 +115,7 @@ DevForge 的目标：**一句话需求 → 一个跑得起来、测得过、看�
 
 **5. 知识沉淀：记忆只存"验证过的"**
 - 失败的经验（半途而废的需求、修不好的 bug）教给下一个项目 = 污染
-- 选择：质检 **PASS / 高分 WARN 才写入记忆**、FAIL 自动清除、召回侧排除未完成项目；函数记忆三态标记（verified / has-issues / unreviewed——**没查过不等于通过**）；修复轮后测试通过才学习**修复模式**（错误签名 → 修复前后对照），fixer 下次遇到同类错误直接参考
+- 选择：质检 **PASS / 高分 WARN 才写入记忆**，召回侧**仅返回验证通过条目**（函数记忆三态标记 verified / has-issues / unreviewed——**没查过不等于通过**）；修复轮后测试通过才学习**修复模式**（错误签名 → 修复前后对照），fixer 下次遇到同类错误直接参考
 - 效果：记忆库是跨项目的"已验证知识库"——CTO 召回历史设计方案，coder 召回已验证的函数实现，fixer 召回已验证的修复模式
 
 **支撑层**（非协作核心，但决定可用性）：
@@ -248,6 +249,22 @@ cd web && npm run dev
 | 架构 | DDD 分层（domain / application / infrastructure / interfaces）· 编排 spec 表驱动 |
 | 质量 | pytest · pytest-cov · ruff · vitest |
 | 依赖 | uv + pyproject.toml + uv.lock |
+
+---
+
+## 📊 实测数据
+
+> 2026-08 全量评测，DeepSeek 真实 API 运行；评测任务集与验证脚本见 `benchmarks/`（本地）。
+
+| 指标 | 数值 |
+|---|---|
+| 端到端任务集 | 10 个（CLI 工具 / 数据分析 / 文件系统 / REST 服务 / ETL 管道） |
+| 首次编译通过率 | 90% |
+| 生成代码可运行交付率（修复前 → 后） | 20% → 90% |
+| 质检通过率（修复前 → 后） | 40% → 80% |
+| LLM 前缀缓存命中率 | 72–80% |
+| 单任务交付时长 | 10–19 分钟 |
+| 平台自身测试 | 298 个 pytest 用例全绿 |
 
 ---
 
