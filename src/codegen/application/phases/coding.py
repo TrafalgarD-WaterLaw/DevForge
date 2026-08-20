@@ -1,5 +1,6 @@
 """Coding — parallel code generation from Design modules."""
 
+import ast
 import json
 import logging
 import os
@@ -58,12 +59,48 @@ def _is_collection_error(output: str) -> bool:
         "collected 0 items",
     ))
 
+def _module_defined_names(src_text: str) -> set[str]:
+    """收集一个模块源码里"已定义"的名字：def / async def / class /
+    顶层赋值（含注解赋值 `x: T = ...`）。
+
+    AST 解析（此前行首 regex 有两个实际缺陷）：
+    1. 漏判 ``async def foo`` 与顶层别名 ``foo = bar.baz`` —— 而
+       contract_gap_text 的提示明确允许 agent 用别名实现导出
+       （"or an alias ``<name> = <existing>``"），提示与检查不一致；
+    2. 误判 docstring/字符串里以 ``def xxx`` 开头的行（整文件拼接后
+       regex 会把文档示例当成已实现导出，掩盖真缺口）。
+    源码语法错误时回退行首 regex（尽力识别，质检兜底再判）。
+    """
+    try:
+        tree = ast.parse(src_text)
+    except SyntaxError:
+        names = set(re.findall(r"^\s*(?:async\s+)?def\s+(\w+)", src_text,
+                               re.MULTILINE))
+        names |= set(re.findall(r"^\s*class\s+(\w+)", src_text, re.MULTILINE))
+        names |= set(re.findall(r"^\s*(\w+)\s*(?::[^=\n]+)?\s*=", src_text,
+                                re.MULTILINE))
+        return names
+    names: set[str] = set()
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            names.add(stmt.name)
+        elif isinstance(stmt, ast.Assign):
+            for t in stmt.targets:
+                if isinstance(t, ast.Name):
+                    names.add(t.id)
+        elif isinstance(stmt, ast.AnnAssign):
+            if isinstance(stmt.target, ast.Name):
+                names.add(stmt.target.id)
+    return names
+
 def contract_gap_check(directory: str, modules: list) -> list[str]:
     """平台级契约检查：AST 对比契约 exports vs 源码实际导出，返回缺口清单。
 
     模块级共享函数（Coding 整合前 + Verification 修复轮后都要用）：
     coder 在并行开发中反复改契约名 —— integrator 靠自觉检查不可靠，
     这里平台先做硬检查：契约声明但源码未定义的导出生成缺口清单。
+    导出认可的定义形态：def / async def / class / 顶层赋值别名。
     """
     if not directory:
         return []
@@ -72,18 +109,17 @@ def contract_gap_check(directory: str, modules: list) -> list[str]:
         name = mod.get("name", "")
         files = [f for f in (mod.get("files") or []) if isinstance(f, str)] \
             or [f"{name or 'main'}.py"]
-        src_text = ""
+        defined: set[str] = set()
         for f in files:
             p = os.path.join(directory, f)
-            if os.path.exists(p):
-                try:
-                    src_text += open(p, encoding="utf-8",
-                                     errors="replace").read()
-                except OSError:
-                    pass
-        defined = set(re.findall(r"^\s*def\s+(\w+)", src_text, re.MULTILINE))
-        defined |= set(re.findall(r"^\s*class\s+(\w+)", src_text,
-                                  re.MULTILINE))
+            if not os.path.exists(p):
+                continue
+            try:
+                src_text = open(p, encoding="utf-8",
+                                errors="replace").read()
+            except OSError:
+                continue
+            defined |= _module_defined_names(src_text)
         for e in mod.get("exports", []):
             en = e.get("name", "")
             if en and en not in defined:
@@ -91,15 +127,92 @@ def contract_gap_check(directory: str, modules: list) -> list[str]:
     return gaps
 
 def contract_gap_text(directory: str, modules: list) -> str:
-    """契约缺口 → 注入 agent prompt 的文本（无缺口返回 ""）。"""
+    """契约缺口 + 入口接线缺口 → 注入 agent prompt 的文本（无缺口返回 ""）。
+
+    integrator/fixer 早期看到接线缺口（缺 __main__ 调用）可直接修掉，
+    省下质检回跳一整轮（实测：缺接线的坏交付物质检 PASS 后要等
+    golden/回跳才发现，白烧验证轮次）。
+    """
     gaps = contract_gap_check(directory, modules)
+    gaps += entry_wiring_check(directory)
     if not gaps:
         return ""
-    return ("\nPLATFORM CONTRACT CHECK — the following exports are "
+    head = ("\nPLATFORM CONTRACT CHECK — the following exports are "
             "declared in the design but MISSING from the source. "
             "Implement them now (as `def <name>(...)` or an alias "
-            "`<name> = <existing>`):\n"
-            + "\n".join(gaps) + "\n")
+            "`<name> = <existing>`):\n")
+    body = "\n".join(gaps)
+    if any("__main__" in g or "入口" in g for g in gaps):
+        head = ("\nPLATFORM CHECKS — fix ALL of the following "
+                "(missing exports AND missing entry wiring):\n")
+    return head + body + "\n"
+
+
+# 入口文件候选名（根目录 + src/ 子目录）
+_ENTRY_CANDIDATES = ["main.py", "cli.py", "app.py", "run.py",
+                     "server.py", "api.py", "entry.py"]
+
+
+def _find_entry_file(directory: str) -> str | None:
+    """探测项目入口文件（根目录优先，其次 src/ 子目录）。"""
+    for rel in _ENTRY_CANDIDATES:
+        for base in (directory, os.path.join(directory, "src")):
+            p = os.path.join(base, rel)
+            if os.path.exists(p):
+                return p
+    return None
+
+
+def entry_wiring_check(directory: str) -> list[str]:
+    """平台级入口接线检查：入口文件必须定义入口函数并以
+    ``if __name__ == "__main__": <entry_fn>()`` 调用之。
+
+    实测发现的真 bug 类别（2026-08-19 bench）：unit_converter /
+    file_organizer 质检 PASS 但 CLI 完全无输出 —— 生成代码定义了
+    main() 却没有 `__main__` 接线，导出函数存在但从未被调用，
+    契约门禁（只查导出存在）查不到这一类。
+    返回缺口清单（空 = 接线完整）。
+    """
+    if not directory or not os.path.isdir(directory):
+        return []
+    entry = _find_entry_file(directory)
+    if entry is None:
+        return ["- 未找到入口文件（main.py/cli.py/app.py/run.py 等，"
+                "含 src/ 子目录）"]
+    try:
+        src_text = open(entry, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return []
+    try:
+        tree = ast.parse(src_text)
+    except SyntaxError:
+        return []          # 语法错误已由契约/质检其他环节兜底
+    # 先查 __main__ 守卫 + 调用：import 包装入口（from cli import run;
+    # run()）不定义函数但接线合法，不能误报。
+    for node in tree.body:
+        if not isinstance(node, ast.If):
+            continue
+        test = node.test
+        if not (isinstance(test, ast.Compare)
+                and isinstance(test.left, ast.Name)
+                and test.left.id == "__name__"):
+            continue
+        if not any(isinstance(c, ast.Constant) and c.value == "__main__"
+                   for c in test.comparators):
+            continue
+        # __main__ 守卫体内必须至少有一个函数调用（接线才算存在）
+        if any(isinstance(stmt, ast.Call)
+               for stmt in ast.walk(node)):
+            return []
+    # 无守卫：本文件定义了函数 → 缺接线；否则 → 缺入口定义
+    funcs = [n.name for n in tree.body
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    if funcs:
+        return [f"- 入口文件 {os.path.basename(entry)} 缺少 "
+                f"`if __name__ == \"__main__\": {funcs[0]}()` 接线"
+                f"（定义了 {funcs[0]}() 但从未作为程序入口调用）"]
+    return [f"- 入口文件 {os.path.basename(entry)} 未定义入口函数"
+            f"且缺少 `if __name__ == \"__main__\":` 接线"]
 
 @register_phase
 class Coding(Phase):
@@ -359,6 +472,7 @@ class Coding(Phase):
         # - import/collection 错误 = 源码接口问题（tester 改不了）→ 直接报告
         # - 断言失败 → 反馈 1 次修测试 → 仍失败 = 源码 bug → 报告转 fixer
         from codegen.application.process import run_process
+        from core.config import load_sys_message
 
         # tester 兜底：react 后磁盘仍无任何 test_*.py（5f7fdc04 实况：
         # tester 卡在 conftest 后停止，测试文件一个都没写，质检直接 NO）
@@ -371,7 +485,7 @@ class Coding(Phase):
             print("  [Tester] 未产出任何测试文件 — 重试 1 次", flush=True)
             cur = getattr(tester, "_max_tool_rounds", None)
             if cur is not None:
-                tester._max_tool_rounds = min(int(cur), 6)
+                tester._max_tool_rounds = min(int(cur), 4)
             tester_report = self._tester_react_result(
                 tester,
                 load_sys_message("tester_no_tests_retry"),
@@ -404,12 +518,11 @@ class Coding(Phase):
                 print(
                     f"  [Tester] 测试失败（反馈 1 次）: {last_line}", flush=True
                 )
-                from core.config import load_sys_message
-                # 反馈轮限 5 轮：修测试 + 复测足够（之前 12 轮跑满，
-                # 反馈轮 10 次调用 ≈ 10 万 tokens 白烧）
+                # 反馈轮限 4 轮：修测试 + 复测足够（此前 12 轮跑满、
+                # 5 轮仍烧 —— 反馈轮每次 ~10 万 tokens 白烧的主因）
                 cur = getattr(tester, "_max_tool_rounds", None)
                 if cur is not None:
-                    tester._max_tool_rounds = min(int(cur), 5)
+                    tester._max_tool_rounds = min(int(cur), 4)
                 tester_report = self._tester_react_result(
                     tester,
                     load_sys_message(

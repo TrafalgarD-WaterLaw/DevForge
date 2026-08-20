@@ -179,7 +179,7 @@ class Agent:
         self._compact_if_needed()
         try:
             result = self._llm.call(
-                self._messages,
+                self._api_messages(),
                 tools=tools,
                 json_mode=json_mode and (not tools),
                 max_tokens=self._max_tokens,
@@ -190,7 +190,7 @@ class Agent:
             )
             try:
                 result = self._llm.call(
-                    self._messages,
+                    self._api_messages(),
                     tools=tools,
                     json_mode=json_mode and (not tools),
                     max_tokens=None,
@@ -251,7 +251,8 @@ class Agent:
             )
             try:
                 retry = self._llm.call(
-                    self._messages, json_mode=True, max_tokens=self._max_tokens
+                    self._api_messages(), json_mode=True,
+                    max_tokens=self._max_tokens,
                 )
             except Exception:
                 return {"_terminated": "llm_error", "message": ""}
@@ -267,7 +268,7 @@ class Agent:
         self._messages.append({"role": "user",
                                "content": load_sys_message("agent_continue")})
         try:
-            retry = self._llm.call(self._messages)
+            retry = self._llm.call(self._api_messages())
             self._record_usage(retry.get("usage"))
             continuation = retry["content"]
             if continuation:
@@ -294,7 +295,7 @@ class Agent:
         )
         try:
             result = self._llm.call(
-                self._messages,
+                self._api_messages(),
                 tools=None,
                 json_mode=json_mode,
                 max_tokens=self._max_tokens,
@@ -324,13 +325,13 @@ class Agent:
             HookRegistry.trigger("llm_delta", agent=self.name, delta=text)
 
         try:
-            text = self._llm.stream_call(self._messages, on_delta=on_delta)
+            text = self._llm.stream_call(self._api_messages(), on_delta=on_delta)
             stream_usage = getattr(self._llm, "last_stream_usage", None)
         except Exception:
             _logger.warning("[%s] stream call failed — falling back", self.name)
             stream_usage = None
             try:
-                result = self._llm.call(self._messages)
+                result = self._llm.call(self._api_messages())
                 stream_usage = result.get("usage")
             except Exception:
                 return {"_terminated": "llm_error", "message": ""}
@@ -384,14 +385,31 @@ class Agent:
                 else:
                     # 旧工具结果截断：保留 tool_call_id 配对结构，
                     # 内容留开头（模型靠它知道"读过什么"）
+                    #
+                    # 关键联动：文件内容被压缩丢弃 → 失效该文件的已读记录。
+                    # 否则"压缩丢弃 + 已读拦截"组合 = 信息黑洞 —— fixer
+                    # 读过的文件内容被截断后无法重读（返回 already read），
+                    # 只能盲改 → 测试失败 → 新结果入上下文 → 再压缩 →
+                    # 死循环（bench 实况：fixer 连续 15 次压缩，任务烧到
+                    # 126 万 token 撞熔断）。
+                    for f in (m.get("_files") or []):
+                        try:
+                            from codegen.infrastructure.tools.registry import runtime
+                            runtime().invalidate_file(f)
+                        except Exception:
+                            pass
+                    # 内容分级：文件内容（read_file/read_many）比测试输出
+                    # 更有复用价值，保留更长尾巴，减少重读需求
+                    tail = 3000 if m.get("_tool") in (
+                        "read_file", "read_many") else _COMPACT_TOOL_TAIL
                     kept.append({
                         **m,
-                        "content": content[:_COMPACT_TOOL_TAIL]
+                        "content": content[:tail]
                         + f"\n…(结果过长，已压缩 {len(content)} → "
-                          f"{_COMPACT_TOOL_TAIL} 字符)",
+                          f"{tail} 字符)",
                     })
                     truncated += 1
-                    budget -= _COMPACT_TOOL_TAIL
+                    budget -= tail
                 continue
             if role == "assistant" and m.get("tool_calls"):
                 kept.append(m)          # tool_calls 消息小，成对保留
@@ -406,14 +424,17 @@ class Agent:
             return
         kept.reverse()
         from core.config import load_sys_message
-        self._messages = [
-            {
-                "role": "system",
-                "content": load_sys_message("agent_context_compacted",
-                                            dropped=dropped + truncated),
-            },
-            *kept,
-        ]
+        # 压缩说明放**末尾**（user 消息）而不是开头插新 system 消息：
+        # DeepSeek 上下文缓存按"请求公共前缀"命中 —— 在开头插入 system
+        # 会把整条前缀改写，压缩后的第一次调用 100% 未命中，且本 agent
+        # 整轮后续调用都失去与压缩前共享的前缀（缓存白烧）。
+        # 放末尾只动消息尾部，保留到首个被裁剪消息为止的公共前缀，
+        # 缓存继续命中；模型同样能读到"上下文被压缩过"的说明。
+        self._messages = [*kept, {
+            "role": "user",
+            "content": load_sys_message("agent_context_compacted",
+                                        dropped=dropped + truncated),
+        }]
         _logger.warning(
             "[%s] context compacted: dropped %d msgs, truncated %d tool "
             "results (%d chars)", self.name, dropped, truncated, total,
@@ -423,6 +444,8 @@ class Agent:
         """Accumulate token usage per agent into the blackboard.
 
         加锁：并行 coder 线程并发调用时，dict 读改写 += 非原子会丢计数。
+        缓存命中/未命中 token 一并累计 —— 前端 token 仪表盘与 benchmark
+        据此算命中率（DeepSeek 前缀缓存命中价 ≈ 未命中价的 1/10）。
         """
         if not usage or self.blackboard is None:
             return
@@ -433,6 +456,12 @@ class Agent:
             )
             entry["prompt_tokens"] += usage.get("prompt_tokens", 0)
             entry["completion_tokens"] += usage.get("completion_tokens", 0)
+            entry["prompt_cache_hit_tokens"] = (
+                entry.get("prompt_cache_hit_tokens", 0)
+                + usage.get("prompt_cache_hit_tokens", 0))
+            entry["prompt_cache_miss_tokens"] = (
+                entry.get("prompt_cache_miss_tokens", 0)
+                + usage.get("prompt_cache_miss_tokens", 0))
             entry["calls"] += 1
 
     def receive(self, llm_response: dict):
@@ -541,8 +570,36 @@ class Agent:
                     agent=self.name,
                 )
             self._messages.append(
-                {"role": "tool", "tool_call_id": tc["id"], "content": results[tc["id"]]}
+                {
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": results[tc["id"]],
+                    # 内部元数据（_api_messages 剥离，不进 API）：
+                    # _tool/_files 供压缩策略用 —— 文件内容被压缩丢弃时
+                    # 失效已读记录，允许重读找回（否则信息黑洞死循环）
+                    "_tool": tc["name"],
+                    "_files": self._tool_files(tc["name"], tc.get("args", {})),
+                }
             )
+
+    @staticmethod
+    def _tool_files(tool: str, args: dict) -> list[str]:
+        """从工具调用的参数里提取文件名（压缩丢弃内容时据此失效已读记录）。"""
+        if tool == "read_file":
+            f = (args or {}).get("filename") or (args or {}).get("path")
+            return [f] if isinstance(f, str) else []
+        if tool == "read_many":
+            fs = (args or {}).get("files") or []
+            return [f for f in fs if isinstance(f, str)]
+        return []
+
+    def _api_messages(self) -> list[dict]:
+        """发给 LLM 的消息：剥离内部元数据键（_tool/_files 等）
+        —— 内部键进 API 会被拒绝（未知消息字段 400）。"""
+        return [
+            {k: v for k, v in m.items() if not k.startswith("_")}
+            for m in self._messages
+        ]
 
     @staticmethod
     def _parse(text: str) -> dict:

@@ -79,6 +79,10 @@ class Pipeline:
 
         HookRegistry.trigger(Events.PHASE_START, phase=name,
                              index=i, total=len(phases))
+        # 阶段预算下发给 blackboard：阶段实现（Verification 修复轮）在
+        # 循环边界检查 _phase_over_budget() 提前收尾，不再只发统计事件
+        self.blackboard["_phase_budget"] = ps.budget if ps else 0
+        self.blackboard["_phase_budget_start"] = self._budget_start
         try:
             phase.run()
             self._on_phase_success(name, phase, started, i, len(phases))
@@ -394,44 +398,62 @@ class Pipeline:
         # Memory: persist phase output for cross-project retrieval。
         # 异步（后台线程）—— ChromaDB upsert 较慢，同步做会卡住阶段边界
         #（用户观察：记忆更新完才继续下一步）。串行锁防并发写。
-        # 质检记忆门槛：PASS 写入；WARN 仅当无证据失败且得分达标（否则
-        # 测试全挂/覆盖率低的 WARN 会被 _completed_projects 当成完成项目
-        # 召回，污染后续项目；而"差一点就过"的高分 WARN 其 verified 函数
-        # 值得复用 —— 此前 WARN 一律不写，这类项目整体隐形）
         qg = self.blackboard.get("quality_gate", {}) or {}
-        if phase_name == "QualityGate":
-            verdict = qg.get("verdict", "")
-            if verdict != "PASS":
-                features = qg.get("features") or []
-                has_evidence_fail = any(
-                    isinstance(f, dict)
-                    and f.get("source") == "evidence"
-                    and f.get("status") in ("NO", "PARTIAL")
-                    for f in features)
-                min_score = int(load_pipeline_config().get(
-                    "memory", {}).get("min_warn_completed_score", 80) or 80)
-                if has_evidence_fail or int(qg.get("score", 0) or 0) < min_score:
-                    return
-
-        def _write_memory():
-            with _memory_lock:
-                try:
-                    from memory.infrastructure.chroma_store import MemoryStore
-                    # 稳定项目标识：目录名的任务前缀（"..._DevForge_时间戳_runid"）。
-                    # project_name 来自 PM 输出（同任务各 run 可能不同）会导致
-                    # 同函数每次 run 写成新条目，旧版本永久堆积并污染召回 ——
-                    # 任务前缀让同任务的重跑 upsert 覆盖旧记忆，只保留最新实现。
-                    project = (Path(directory).name.split("_DevForge_", 1)[0]
-                               or self.blackboard.get("requirements", {})
-                               .get("project_name", ""))[:80]
-                    # blackboard 可指定隔离记忆库（benchmark 不污染生产记忆）
-                    MemoryStore(
-                        chroma_dir=self.blackboard.get("_memory_dir", "")
-                    ).write_phase(project, phase_name, self.blackboard)
-                except Exception:
-                    _log.warning("Failed to write memory for %s", phase_name)
-
-        t = threading.Thread(target=_write_memory, daemon=True)
+        if phase_name == "QualityGate" \
+                and not self._quality_gate_memory_allowed(qg):
+            return
+        t = threading.Thread(
+            target=self._write_memory, args=(directory, phase_name),
+            daemon=True)
         self._memory_threads.append(t)
         t.start()
+
+    # ── QualityGate 记忆门槛 ────────────────────────────
+
+    def _quality_gate_memory_allowed(self, qg: dict) -> bool:
+        """质检结果能否写入跨项目记忆（纯方法，便于测试）。
+
+        - FAIL 一律不写（含平台契约 FAIL —— 此前只靠 score 间接拦截，
+          平台 FAIL 高分会被当"差一点就过"写库，直接违背 README
+          "FAIL 自动清除"的设计；score 归零是门禁侧兜底，这里显式拦截）
+        - PASS 写入
+        - WARN 仅当无证据失败（测试失败/覆盖率低）且得分达标 ——
+          否则测试全挂的 WARN 会被 _completed_projects 当成完成项目
+          召回污染后续项目；"差一点就过"的高分 WARN 其 verified 函数
+          值得复用
+        """
+        verdict = qg.get("verdict", "")
+        if verdict == "FAIL":
+            return False
+        if verdict != "PASS":
+            features = qg.get("features") or []
+            has_evidence_fail = any(
+                isinstance(f, dict)
+                and f.get("source") == "evidence"
+                and f.get("status") in ("NO", "PARTIAL")
+                for f in features)
+            min_score = int(load_pipeline_config().get(
+                "memory", {}).get("min_warn_completed_score", 80) or 80)
+            if has_evidence_fail or int(qg.get("score", 0) or 0) < min_score:
+                return False
+        return True
+
+    def _write_memory(self, directory: str, phase_name: str):
+        """后台线程写跨项目记忆（ChromaDB upsert 慢，同步会卡住阶段边界）。"""
+        with _memory_lock:
+            try:
+                from memory.infrastructure.chroma_store import MemoryStore
+                # 稳定项目标识：目录名的任务前缀（"..._DevForge_时间戳_runid"）。
+                # project_name 来自 PM 输出（同任务各 run 可能不同）会导致
+                # 同函数每次 run 写成新条目，旧版本永久堆积并污染召回 ——
+                # 任务前缀让同任务的重跑 upsert 覆盖旧记忆，只保留最新实现。
+                project = (Path(directory).name.split("_DevForge_", 1)[0]
+                           or self.blackboard.get("requirements", {})
+                           .get("project_name", ""))[:80]
+                # blackboard 可指定隔离记忆库（benchmark 不污染生产记忆）
+                MemoryStore(
+                    chroma_dir=self.blackboard.get("_memory_dir", "")
+                ).write_phase(project, phase_name, self.blackboard)
+            except Exception:
+                _log.warning("Failed to write memory for %s", phase_name)
 

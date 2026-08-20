@@ -91,8 +91,8 @@ class Phase:
         CTO → phase-level summaries.  Coder/Tester → function-level verified
         implementations.  Fixer → FixPattern 修复模式（错误签名召回）。"""
         try:
-            from memory.infrastructure.chroma_store import (
-                MemoryStore,
+            from memory.infrastructure.chroma_store import MemoryStore
+            from memory.interfaces.prompt_formatter import (
                 format_fix_memories,
                 format_function_memories,
                 format_memories,
@@ -159,6 +159,24 @@ class Phase:
             return {}
         with open(_CONFIGS_DIR / path, encoding="utf-8") as f:
             return json.load(f)
+
+    def _phase_over_budget(self) -> bool:
+        """当前阶段 token 消耗是否超过 pipeline_spec 阶段预算。
+
+        预算由 pipeline 在阶段开始前写入 blackboard
+        （``_phase_budget`` / ``_phase_budget_start``）。阶段实现
+        （Verification 修复轮等）在循环边界检查：超预算提前收尾、
+        带当前状态进质检降级交付，而不是无限修到撞全局熔断
+        （bench 实况：阶段预算此前只发统计事件不拦截，Verification
+        可烧到 50 万+ token 才被 90 万全局熔断整任务陪葬）。
+        """
+        budget = int(self.blackboard.get("_phase_budget", 0) or 0)
+        if budget <= 0:
+            return False
+        start = int(self.blackboard.get("_phase_budget_start", 0) or 0)
+        usage = self.blackboard.get("usage_log", {}) or {}
+        used = sum(e.get("prompt_tokens", 0) for e in usage.values()) - start
+        return used > budget
 
     # ── Subclass contract ───────────────────────────────
 

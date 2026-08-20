@@ -286,10 +286,24 @@ class ToolRuntime:
         return bool(agent) and path in self._read_files.get(agent, ())
 
     def invalidate_file(self, path: str):
-        """文件被写（内容变化）→ 所有 agent 对该文件的已读记录失效，
-        允许重新读取新内容。"""
+        """文件被写/内容被压缩丢弃 → 所有 agent 对该文件的已读记录失效，
+        允许重新读取。
+
+        mark_read 存的是规范化绝对路径；调用方（压缩丢弃 read_file 结果、
+        write_file）可能传相对项目根的原始名 —— 两种形态都失效，否则
+        相对名 discard 落空（= 已读记录残留 → 压缩丢弃的信息无法重读，
+        fixer 盲改死循环）。
+        """
+        forms = {path}
+        try:
+            root = os.path.realpath(self.project_dir)
+            if root:
+                forms.add(os.path.realpath(os.path.join(root, path)))
+        except Exception:
+            pass
         for s in self._read_files.values():
-            s.discard(path)
+            for f in forms:
+                s.discard(f)
 
     # ── 工具白名单（硬约束）────────────────────────────
 

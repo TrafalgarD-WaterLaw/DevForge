@@ -137,9 +137,16 @@ class LLMClient:
         msg = choice.message
         usage = None
         if getattr(response, "usage", None):
+            # DeepSeek 自动前缀缓存：usage 返回命中/未命中的 prompt token
+            # 分解（prompt_tokens = hit + miss）。不记录就永远无法度量
+            # 缓存命中率、无法发现"缓存杀手"（易变前缀/前缀被改写的消息）
             usage = {
                 "prompt_tokens": response.usage.prompt_tokens or 0,
                 "completion_tokens": response.usage.completion_tokens or 0,
+                "prompt_cache_hit_tokens": getattr(
+                    response.usage, "prompt_cache_hit_tokens", 0) or 0,
+                "prompt_cache_miss_tokens": getattr(
+                    response.usage, "prompt_cache_miss_tokens", 0) or 0,
             }
         return {
             "content": msg.content or "",
@@ -183,6 +190,10 @@ class LLMClient:
                     self.last_stream_usage = {
                         "prompt_tokens": usage.prompt_tokens or 0,
                         "completion_tokens": usage.completion_tokens or 0,
+                        "prompt_cache_hit_tokens": getattr(
+                            usage, "prompt_cache_hit_tokens", 0) or 0,
+                        "prompt_cache_miss_tokens": getattr(
+                            usage, "prompt_cache_miss_tokens", 0) or 0,
                     }
                 continue
             delta = chunk.choices[0].delta

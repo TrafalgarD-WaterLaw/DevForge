@@ -96,19 +96,68 @@ def run_project_tests(
 class Verification(Phase):
     """Multi-lens review + automated test + fix loop."""
 
+    def _scan_project_files(self, directory: str) -> dict[str, str]:
+        """扫描项目全部 .py 文件内容（磁盘权威，含测试文件）。"""
+        files: dict[str, str] = {}
+        skip = {".venv", "__pycache__", ".git", ".devforge", ".pytest_cache"}
+        for root, dirs, fs in os.walk(directory):
+            dirs[:] = [d for d in dirs if d not in skip]
+            for f in fs:
+                if f.endswith(".py"):
+                    p = os.path.join(root, f)
+                    try:
+                        files[os.path.relpath(p, directory)] = open(
+                            p, encoding="utf-8", errors="replace").read()
+                    except OSError:
+                        pass
+        return files
+
+    def _changed_files(self, directory: str) -> list[str]:
+        """fixer 修复前后源码 diff（磁盘权威，含测试文件 ——
+        reload_codes 跳过 test_*.py，仅靠 blackboard.codes 会漏掉
+        "只改了测试"的修复）。"""
+        if not directory:
+            return []
+        pre = getattr(self, "_pre_files", None)
+        if pre is None:
+            return []
+        cur = self._scan_project_files(directory)
+        return sorted([f for f in cur if cur[f] != pre.get(f)]
+                      + [f for f in pre if f not in cur])
+
     def run(self):
         directory = self.blackboard.get("directory", "")
         lenses = load_phases_config().get("Verification", {}).get("lenses", [])
         rounds = int(load_pipeline_config().get("verification_rounds", 2) or 2)
         for loop in range(1, rounds + 1):
             HookRegistry.trigger("review_round", phase="Verification", loop=loop)
+            # 阶段预算：超预算停止修复循环，带当前状态进质检降级交付
+            #（此前修复循环可烧到全局熔断才停，整任务陪葬）
+            if self._phase_over_budget():
+                print("  [Verification] 阶段预算耗尽 — 停止修复，"
+                      "带当前状态进入质检", flush=True)
+                break
+            # 第二轮起增量复审：fixer 改了什么就只审什么（全新 reviewer
+            # 重读全部文件是 token 大头）；fixer 没改任何文件 → 复审无意义
+            if loop > 1:
+                changed = self._changed_files(directory)
+                if not changed:
+                    print("  [Verification] fixer 未改动任何文件 — 跳过复审",
+                          flush=True)
+                    break
+            else:
+                changed = None
+            # 修复前快照（磁盘）—— 下一轮增量复审据此 diff
+            if directory:
+                self._pre_files = self._scan_project_files(directory)
             self._pre_codes = dict(self.blackboard.codes)
             # 测试先行：reviewer 基于真实行为证据审查。此前测试输出只给
             # fixer，reviewer 拿不到 —— 审查与测试两条证据链脱节，审查员
             # 重复发现 tester 已报告的问题。同一份输出也喂给 fixer。
             has_bugs, test_output, infra_failed = self._run_tests()
             review_texts, discarded, valid = self._run_review_round(
-                lenses, loop, test_output)
+                lenses, loop, test_output, changed=changed,
+                tests_passed=(not has_bugs) and (not infra_failed))
             # 测试基础设施失败（pytest 装不上/入口也跑不通）≠ 项目 bug：
             # 没有 review 意见时不再为此单开 fix 轮（fixer 修不了环境问题）
             if (not has_bugs or infra_failed) \
@@ -121,10 +170,17 @@ class Verification(Phase):
             )
 
     def _run_review_round(
-        self, lenses: list, loop: int, test_output: str = ""
+        self, lenses: list, loop: int, test_output: str = "",
+        changed: list[str] | None = None, tests_passed: bool = False,
     ) -> tuple[list[str], int, int]:
         """多 lens 并行审查 + schema 校验重试。返回
-        (review_texts, discarded, valid)。"""
+        (review_texts, discarded, valid)。
+
+        *tests_passed*：测试通过时降噪 —— 审查范围收紧（只报测试覆盖
+        不到的真实缺陷），且 fixer 队列只收 HIGH（实测：测试全过的代码
+        被 reviewer 报 30+ 条 HIGH/MEDIUM/LOW，fixer 无从下手甚至
+        零改动，修复轮空转烧 token）。
+        """
         review_texts = []
         discarded = 0
         valid = 0
@@ -132,6 +188,14 @@ class Verification(Phase):
             self.blackboard.get("requirements", {}), ensure_ascii=False
         )
         contracts = self._contracts_text()
+        # 测试通过 → 降噪指引（审查范围收窄，风格/性能/重构建议不报）
+        if tests_passed:
+            guidance = ("\n\n自动测试已全部通过，功能行为正确。请只报告"
+                        "测试覆盖不到的真实缺陷（边界条件、错误处理、"
+                        "安全漏洞、并发/资源问题）。不要报告风格、性能、"
+                        "重构建议等非阻塞问题。")
+        else:
+            guidance = ""
         # 第二轮（fixer 修完后）是确认性重审：只读改动确认修复正确，
         # 不需要第一轮的全量深度分析 —— 限 3 轮（read_many + 输出），
         # 4 个 reviewer 两轮全量审查是 token 大头（6ff5ccee: 36 万）
@@ -140,10 +204,22 @@ class Verification(Phase):
             agent = self.agent("reviewer", tag=f"{l['name']}Reviewer")
             if loop > 1:
                 self._cap_tool_rounds(agent, 3)
+            if changed:
+                # 增量复审：只注入变更文件内容 + 明确范围
+                codes_text = "\n\n".join(
+                    f"===== {f} =====\n{self.blackboard.codes.get(f, '')}"
+                    for f in changed)
+                focus = (f"本轮为修复后复审：仅审查以下变更文件，"
+                         f"确认修复正确、未引入新问题。\n"
+                         f"变更文件: {', '.join(changed)}\n\n"
+                         f"Focus: {l['focus']}")
+            else:
+                codes_text = self.files
+                focus = f"Focus: {l['focus']}"
             tasks.append(
                 (
                     agent,
-                    f"Focus: {l['focus']}\n\n{self.prompt('reviewer', codes=self.files, requirements=requirements, contracts=contracts, test_output=(test_output or '(no tests run)')[:1500])}",
+                    f"{focus}\n\n{self.prompt('reviewer', codes=codes_text, requirements=requirements, contracts=contracts, test_output=(test_output or '(no tests run)')[:1500])}{guidance}",
                     True,
                 )
             )
@@ -178,12 +254,22 @@ class Verification(Phase):
                 "review_submitted", agent=agent.name, issues=issues, loop=loop
             )
             if issues:
+                # 审查降噪：fixer 队列按 severity 过滤 —— 测试通过时
+                # 只收 HIGH（行为正确，MEDIUM/LOW 多为风格/建议）；
+                # 测试失败时收 HIGH+MEDIUM（LOW 一律不进 fixer 轮）。
+                # 完整清单仍留在 blackboard（前端展示/审计）。
+                floor = "HIGH" if tests_passed else "MEDIUM"
+                keep_sev = {"HIGH", floor}
+                kept = [i for i in issues
+                        if i.get("severity", "LOW") in keep_sev]
+                if not kept:
+                    continue
                 review_texts.append(
                     f"### {agent.name}\n"
                     + "\n".join(
                         (
                             f"- [{i['severity']}] {i['file']}:{i['line']} {i['description']}"
-                            for i in issues
+                            for i in kept
                         )
                     )
                 )
@@ -412,6 +498,12 @@ class Verification(Phase):
             agent._max_tool_rounds = min(int(cur), cap)
 
     @staticmethod
-    def _run_process(cmd, cwd, timeout: int):
-        """Run *cmd* — 公共实现（codegen.application.process.run_process）。"""
-        return run_process(cmd, cwd, timeout)
+    def _run_process(cmd, cwd, timeout: int, env=None):
+        """Run *cmd* — 公共实现（codegen.application.process.run_process）。
+
+        *env* 透传：宿主机回退路径注入运行期沙箱 shim 环境（T9-A）——
+        此前漏掉该参数导致 Verification 阶段 `run_project_tests` 的
+        host fallback 分支 TypeError 崩溃（"unexpected keyword argument
+        'env'"），任务在验证阶段直接失败。
+        """
+        return run_process(cmd, cwd, timeout, env=env)
